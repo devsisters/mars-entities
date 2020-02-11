@@ -1,7 +1,10 @@
+#if !UNITY_EDITOR
+
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using Mono.Cecil;
+using Unity.IL2CPP.ILPreProcessor;
 
 namespace Unity.Entities.BuildUtils
 {
@@ -86,6 +89,13 @@ namespace Unity.Entities.BuildUtils
             return true;
         }
 
+        public static bool IsStructWithInterface(this TypeDefinition type, string fullName)
+        {
+            return type.IsStructValueType()
+                && type.HasInterfaces
+                && type.Interfaces.FirstOrDefault(i => i.InterfaceType.FullName == fullName) != null;
+        }
+
         public static bool IsEntityType(this TypeReference typeRef)
         {
             return (typeRef.FullName == "Unity.Entities.Entity");
@@ -119,12 +129,14 @@ namespace Unity.Entities.BuildUtils
             if (type.IsValueType)
             {
                 // if none of the above check the type's fields
+                var typeResolver = TypeResolver.For(typeRef);
                 foreach (var field in type.Fields)
                 {
                     if (field.IsStatic)
                         continue;
 
-                    if (field.FieldType.IsManagedType())
+                    var fieldType = typeResolver.Resolve(field.FieldType);
+                    if (fieldType.IsManagedType())
                         return true;
                 }
 
@@ -141,15 +153,14 @@ namespace Unity.Entities.BuildUtils
             if (typeRef.IsPointer)
                 return false;
 
-            var type = typeRef.Resolve();
 
-            if (TypeUtils.ValueTypeIsComplex[0].ContainsKey(type))
-                return TypeUtils.ValueTypeIsComplex[0][type];
+            if (TypeUtils.ValueTypeIsComplex[0].ContainsKey(typeRef))
+                return TypeUtils.ValueTypeIsComplex[0][typeRef];
 
-            if (type.IsDynamicArray())
+            if (typeRef.IsDynamicArray())
                 return true;
 
-            TypeDefinition fixedSpecialType = type.FixedSpecialType();
+            TypeDefinition fixedSpecialType = typeRef.FixedSpecialType();
             if (fixedSpecialType != null)
             {
                 if (fixedSpecialType.MetadataType == MetadataType.String)
@@ -157,12 +168,12 @@ namespace Unity.Entities.BuildUtils
                 return false;
             }
 
-            if (type.IsEnum)
+            if (typeRef.Resolve().IsEnum)
                 return false;
 
-            TypeUtils.PreprocessTypeFields(type, 0);
+            TypeUtils.PreprocessTypeFields(typeRef, 0);
 
-            return TypeUtils.ValueTypeIsComplex[0][type];
+            return TypeUtils.ValueTypeIsComplex[0][typeRef];
         }
 
         public static bool IsPodType(this TypeReference typeRef)
@@ -170,11 +181,13 @@ namespace Unity.Entities.BuildUtils
             TypeDefinition type = typeRef.Resolve();
             if (type.IsCppBasicType() || type.IsEnum) return true;
 
+            var typeResolver = TypeResolver.For(typeRef);
             foreach (var f in type.Fields)
             {
-                if (f.FieldType.MetadataType == MetadataType.String || f.FieldType.IsDynamicArray())
+                var fieldType = typeResolver.Resolve(f.FieldType);
+                if (fieldType.MetadataType == MetadataType.String || fieldType.IsDynamicArray())
                     return false;
-                bool recursiveIsPodType = IsPodType(f.FieldType.Resolve());
+                bool recursiveIsPodType = IsPodType(fieldType);
                 if (!recursiveIsPodType)
                     return false;
             }
@@ -279,3 +292,5 @@ namespace Unity.Entities.BuildUtils
         }
     }
 }
+
+#endif

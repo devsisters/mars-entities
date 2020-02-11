@@ -9,6 +9,13 @@ using Unity.Collections.LowLevel.Unsafe;
 
 namespace Unity.Entities
 {
+	/// <summary>
+	/// An array-like data structure that can be used as a component.
+	/// </summary>
+    /// <example>
+    /// <code source="../../DocCodeSamples.Tests/DynamicBufferExamples.cs" language="csharp" region="dynamicbuffer.class"/>
+    /// </example>
+    /// <typeparam name="T">The data type stored in the buffer. Must be a value type.</typeparam>
 	[StructLayout(LayoutKind.Sequential)]
 	[NativeContainer]
     [DebuggerDisplay("Length = {Length}, Capacity = {Capacity}, IsCreated = {IsCreated}")]
@@ -27,10 +34,12 @@ namespace Unity.Entities
         internal int m_SafetyReadOnlyCount;
         internal int m_SafetyReadWriteCount;
         internal bool m_IsReadOnly;
+        internal bool m_useMemoryInitPattern;
+        internal byte m_memoryInitPattern;
 #endif
 
 #if ENABLE_UNITY_COLLECTIONS_CHECKS
-        internal DynamicBuffer(BufferHeader* header, AtomicSafetyHandle safety, AtomicSafetyHandle arrayInvalidationSafety, bool isReadOnly, int internalCapacity)
+        internal DynamicBuffer(BufferHeader* header, AtomicSafetyHandle safety, AtomicSafetyHandle arrayInvalidationSafety, bool isReadOnly, bool useMemoryInitPattern, byte memoryInitPattern, int internalCapacity)
         {
             m_Buffer = header;
             m_Safety0 = safety;
@@ -39,6 +48,8 @@ namespace Unity.Entities
             m_SafetyReadWriteCount = isReadOnly ? 0 : 2;
             m_IsReadOnly = isReadOnly;
             m_InternalCapacity = internalCapacity;
+            m_useMemoryInitPattern = useMemoryInitPattern;
+            m_memoryInitPattern = memoryInitPattern;
         }
 #else
         internal DynamicBuffer(BufferHeader* header, int internalCapacity)
@@ -51,6 +62,9 @@ namespace Unity.Entities
         /// <summary>
         /// The number of elements the buffer holds.
         /// </summary>
+        /// <example>
+        /// <code source="../../DocCodeSamples.Tests/DynamicBufferExamples.cs" language="csharp" region="dynamicbuffer.length"/>
+        /// </example>
         public int Length
         {
             get
@@ -63,6 +77,13 @@ namespace Unity.Entities
         /// <summary>
         /// The number of elements the buffer can hold.
         /// </summary>
+        /// <remarks>
+        /// <paramref name="Capacity"/> can not be set lower than <see cref="Length"/> - this will raise an exception. 
+        /// If <paramref name="Capacity"/> grows greater than the internal capacity of the DynamicBuffer, memory external to the DynamicBuffer will be allocated.
+        /// If <paramref name="Capacity"/> shrinks to the internal capacity of the DynamicBuffer or smaller, memory external to the DynamicBuffer will be freed.
+        /// No effort is made to avoid costly reallocations when <paramref name="Capacity"/> changes slightly;
+        /// if <paramref name="Capacity"/> is incremented by 1, an array 1 element bigger is allocated.
+        /// </remarks>
         public int Capacity
         {
             get
@@ -70,8 +91,24 @@ namespace Unity.Entities
                 CheckReadAccess();
                 return m_Buffer->Capacity;
             }
+            set
+            {
+#if ENABLE_UNITY_COLLECTIONS_CHECKS
+                if(value < Length)
+                    throw new InvalidOperationException($"Capacity {value} can't be set smaller than Length {Length}");
+#endif
+                CheckWriteAccessAndInvalidateArrayAliases();
+#if ENABLE_UNITY_COLLECTIONS_CHECKS
+                BufferHeader.SetCapacity(m_Buffer, value, UnsafeUtility.SizeOf<T>(), UnsafeUtility.AlignOf<T>(), BufferHeader.TrashMode.RetainOldData, m_useMemoryInitPattern, m_memoryInitPattern, m_InternalCapacity);
+#else
+                BufferHeader.SetCapacity(m_Buffer, value, UnsafeUtility.SizeOf<T>(), UnsafeUtility.AlignOf<T>(), BufferHeader.TrashMode.RetainOldData, false, 0, m_InternalCapacity);
+#endif
+            }
         }
 
+        /// <summary>
+        /// Whether the memory for this dynamic buffer has been allocated.
+        /// </summary>
         public bool IsCreated
         {
             get
@@ -116,6 +153,13 @@ namespace Unity.Entities
 #endif
         }
 
+        /// <summary>
+        /// Array-like indexing operator.
+        /// </summary>
+        /// <example>
+        /// <code source="../../DocCodeSamples.Tests/DynamicBufferExamples.cs" language="csharp" region="dynamicbuffer.indexoperator"/>
+        /// </example>
+        /// <param name="index">The zero-based index.</param>
         public T this [int index]
         {
             get
@@ -135,23 +179,72 @@ namespace Unity.Entities
         /// <summary>
         /// Increases the buffer capacity and length.
         /// </summary>
+        /// <remarks>If <paramref name="length"/> is less than the current
+        /// length of the buffer, the length of the buffer is reduced while the
+        /// capacity remains unchanged.</remarks>
+        /// <example>
+        /// <code source="../../DocCodeSamples.Tests/DynamicBufferExamples.cs" language="csharp" region="dynamicbuffer.resizeuninitialized"/>
+        /// </example>
         /// <param name="length">The new length of the buffer.</param>
         public void ResizeUninitialized(int length)
         {
-            Reserve(length);
+            EnsureCapacity(length);
             m_Buffer->Length = length;
+        }
+
+        /// <summary>
+        /// Ensures that the buffer has at least the specified capacity.
+        /// </summary>
+        /// <remarks>If <paramref name="length"/> is greater than the current <see cref="Capacity"/>
+        /// of this buffer and greater than the capacity reserved with
+        /// <see cref="InternalBufferCapacityAttribute"/>, this function allocates a new memory block
+        /// and copies the current buffer to it. The number of elements in the buffer remains
+        /// unchanged.</remarks>
+        /// <example>
+        /// <code source="../../DocCodeSamples.Tests/DynamicBufferExamples.cs" language="csharp" region="dynamicbuffer.reserve"/>
+        /// </example>
+        /// <param name="length">The buffer capacity is ensured to be at least this big.</param> 
+        public void EnsureCapacity(int length)
+        {
+            CheckWriteAccessAndInvalidateArrayAliases();
+#if ENABLE_UNITY_COLLECTIONS_CHECKS
+            BufferHeader.EnsureCapacity(m_Buffer, length, UnsafeUtility.SizeOf<T>(), UnsafeUtility.AlignOf<T>(), BufferHeader.TrashMode.RetainOldData, m_useMemoryInitPattern, m_memoryInitPattern);
+#else
+            BufferHeader.EnsureCapacity(m_Buffer, length, UnsafeUtility.SizeOf<T>(), UnsafeUtility.AlignOf<T>(), BufferHeader.TrashMode.RetainOldData, false, 0);
+#endif
         }
 
         /// <summary>
         /// Increases the buffer capacity without increasing its length.
         /// </summary>
+        /// <remarks>If <paramref name="length"/> is greater than the current <see cref="Capacity"/>
+        /// of this buffer and greater than the capacity reserved with
+        /// <see cref="InternalBufferCapacityAttribute"/>, this function allocates a new memory block
+        /// and copies the current buffer to it. The number of elements in the buffer remains
+        /// unchanged.</remarks>
+        /// <example>
+        /// <code source="../../DocCodeSamples.Tests/DynamicBufferExamples.cs" language="csharp" region="dynamicbuffer.reserve"/>
+        /// </example>
         /// <param name="length">The new buffer capacity.</param>
+        [Obsolete("Reserve has been deprecated in favor of setting the Capacity property. This method will be (RemovedAfter 2020-03-05)")]
         public void Reserve(int length)
         {
             CheckWriteAccessAndInvalidateArrayAliases();
-            BufferHeader.EnsureCapacity(m_Buffer, length, UnsafeUtility.SizeOf<T>(), UnsafeUtility.AlignOf<T>(), BufferHeader.TrashMode.RetainOldData);
+#if ENABLE_UNITY_COLLECTIONS_CHECKS
+            BufferHeader.EnsureCapacity(m_Buffer, length, UnsafeUtility.SizeOf<T>(), UnsafeUtility.AlignOf<T>(), BufferHeader.TrashMode.RetainOldData, m_useMemoryInitPattern, m_memoryInitPattern);
+#else
+            BufferHeader.EnsureCapacity(m_Buffer, length, UnsafeUtility.SizeOf<T>(), UnsafeUtility.AlignOf<T>(), BufferHeader.TrashMode.RetainOldData, false, 0);
+#endif
         }
-
+        
+        /// <summary>
+        /// Sets the buffer length to zero.
+        /// </summary>
+        /// <remarks>The capacity of the buffer remains unchanged. Buffer memory
+        /// is not overwritten.</remarks>
+        /// <example>
+        /// <code source="../../DocCodeSamples.Tests/DynamicBufferExamples.cs" language="csharp" region="dynamicbuffer.clear"/>
+        /// </example>
         public void Clear()
         {
             CheckWriteAccessAndInvalidateArrayAliases();
@@ -159,6 +252,18 @@ namespace Unity.Entities
             m_Buffer->Length = 0;
         }
 
+        /// <summary>
+        /// Removes any excess capacity in the buffer.
+        /// </summary>
+        /// <remarks>Sets the buffer capacity to the current length.
+        /// If the buffer memory size changes, the current contents
+        /// of the buffer are copied to a new block of memory and the
+        /// old memory is freed. If the buffer now fits in the space in the
+        /// chunk reserved with <see cref="InternalBufferCapacityAttribute"/>,
+        /// then the buffer contents are moved to the chunk.</remarks>
+        /// <example>
+        /// <code source="../../DocCodeSamples.Tests/DynamicBufferExamples.cs" language="csharp" region="dynamicbuffer.trimexcess"/>
+        /// </example>
         public void TrimExcess()
         {
             CheckWriteAccessAndInvalidateArrayAliases();
@@ -195,6 +300,15 @@ namespace Unity.Entities
             UnsafeUtility.Free(oldPtr, Allocator.Persistent);
         }
 
+        /// <summary>
+        /// Adds an element to the end of the buffer, resizing as necessary.
+        /// </summary>
+        /// <remarks>The buffer is resized if it has no additional capacity.</remarks>
+        /// <example>
+        /// <code source="../../DocCodeSamples.Tests/DynamicBufferExamples.cs" language="csharp" region="dynamicbuffer.add"/>
+        /// </example>
+        /// <param name="elem">The element to add to the buffer.</param>
+        /// <returns>The new length of the buffer.</returns>
         public int Add(T elem)
         {
             CheckWriteAccess();
@@ -204,6 +318,15 @@ namespace Unity.Entities
             return length;
         }
 
+        /// <summary>
+        /// Inserts an element at the specified index, resizing as necessary.
+        /// </summary>
+        /// <remarks>The buffer is resized if it has no additional capacity.</remarks>
+        /// <example>
+        /// <code source="../../DocCodeSamples.Tests/DynamicBufferExamples.cs" language="csharp" region="dynamicbuffer.insert"/>
+        /// </example>
+        /// <param name="index">The position at which to insert the new element.</param>
+        /// <param name="elem">The element to add to the buffer.</param>
         public void Insert(int index, T elem)
         {
             CheckWriteAccess();
@@ -216,6 +339,15 @@ namespace Unity.Entities
             this[index] = elem;
         }
 
+        /// <summary>
+        /// Adds all the elements from <paramref name="newElems"/> to the end
+        /// of the buffer, resizing as necessary.
+        /// </summary>
+        /// <remarks>The buffer is resized if it has no additional capacity.</remarks>
+        /// <example>
+        /// <code source="../../DocCodeSamples.Tests/DynamicBufferExamples.cs" language="csharp" region="dynamicbuffer.addrange"/>
+        /// </example>
+        /// <param name="newElems">The native array of elements to insert.</param>
         public void AddRange(NativeArray<T> newElems)
         {
             CheckWriteAccess();
@@ -227,6 +359,15 @@ namespace Unity.Entities
             UnsafeUtility.MemCpy(basePtr + (long)oldLength * elemSize, newElems.GetUnsafeReadOnlyPtr<T>(), (long)elemSize * newElems.Length);
         }
 
+        /// <summary>
+        /// Removes the specified number of elements, starting with the element at the specified index.
+        /// </summary>
+        /// <remarks>The buffer capacity remains unchanged.</remarks>
+        /// <example>
+        /// <code source="../../DocCodeSamples.Tests/DynamicBufferExamples.cs" language="csharp" region="dynamicbuffer.removerange"/>
+        /// </example>
+        /// <param name="index">The first element to remove.</param>
+        /// <param name="count">How many elements tot remove.</param>
         public void RemoveRange(int index, int count)
         {
             CheckWriteAccess();
@@ -240,17 +381,41 @@ namespace Unity.Entities
             m_Buffer->Length -= count;
         }
 
+        /// <summary>
+        /// Removes the element at the specified index.
+        /// </summary>
+        /// <example>
+        /// <code source="../../DocCodeSamples.Tests/DynamicBufferExamples.cs" language="csharp" region="dynamicbuffer.removeat"/>
+        /// </example>
+        /// <param name="index">The index of the element to remove.</param>
         public void RemoveAt(int index)
         {
             RemoveRange(index, 1);
         }
 
+        /// <summary>
+        /// Gets an <see langword="unsafe"/> pointer to the contents of the buffer.
+        /// </summary>
+        /// <remarks>This function can only be called in unsafe code contexts.</remarks>
+        /// <returns>A typed, unsafe pointer to the first element in the buffer.</returns>
         public void* GetUnsafePtr()
         {
             CheckWriteAccess();
             return BufferHeader.GetElementPointer(m_Buffer);
         }
 
+        /// <summary>
+        /// Returns a dynamic buffer of a different type, pointing to the same buffer memory.
+        /// </summary>
+        /// <remarks>No memory modification occurs. The reinterpreted type must be the same size
+        /// in memory as the original type.</remarks>
+        /// <example>
+        /// <code source="../../DocCodeSamples.Tests/DynamicBufferExamples.cs" language="csharp" region="dynamicbuffer.reinterpret"/>
+        /// </example>
+        /// <typeparam name="U">The reinterpreted type.</typeparam>
+        /// <returns>A dynamic buffer of the reinterpreted type.</returns>
+        /// <exception cref="InvalidOperationException">If the reinterpreted type is a different
+        /// size than the original.</exception>
         public DynamicBuffer<U> Reinterpret<U>() where U: struct
         {
 #if ENABLE_UNITY_COLLECTIONS_CHECKS
@@ -260,15 +425,22 @@ namespace Unity.Entities
             // NOTE: We're forwarding the internal capacity along to this aliased, type-punned buffer.
             // That's OK, because if mutating operations happen they are all still the same size.
 #if ENABLE_UNITY_COLLECTIONS_CHECKS
-            return new DynamicBuffer<U>(m_Buffer, m_Safety0, m_Safety1, m_IsReadOnly, m_InternalCapacity);
+            return new DynamicBuffer<U>(m_Buffer, m_Safety0, m_Safety1, m_IsReadOnly, m_useMemoryInitPattern, m_memoryInitPattern, m_InternalCapacity);
 #else
             return new DynamicBuffer<U>(m_Buffer, m_InternalCapacity);
 #endif
         }
 
         /// <summary>
-        /// Return a native array that aliases the buffer contents. The array is only legal to access as long as the buffer is not reallocated.
+        /// Return a native array that aliases the original buffer contents.
         /// </summary>
+        /// <remarks>You can only access the native array as long as the
+        /// the buffer memory has not been reallocated. Several dynamic buffer operations,
+        /// such as <see cref="Add"/> and <see cref="TrimExcess"/> can result in
+        /// buffer reallocation.</remarks>
+        /// <example>
+        /// <code source="../../DocCodeSamples.Tests/DynamicBufferExamples.cs" language="csharp" region="dynamicbuffer.asnativearray"/>
+        /// </example>
         public NativeArray<T> AsNativeArray()
         {
             CheckReadAccess();
@@ -282,27 +454,57 @@ namespace Unity.Entities
 #endif
             return shadow;
         }
-        
+
+        /// <summary>
+        /// Provides an enumerator for iterating over the buffer elements.
+        /// </summary>
+        /// <example>
+        /// <code source="../../DocCodeSamples.Tests/DynamicBufferExamples.cs" language="csharp" region="dynamicbuffer.getenumerator"/>
+        /// </example>
+        /// <returns>The enumerator.</returns>
         public NativeArray<T>.Enumerator GetEnumerator()
         {
             var array = AsNativeArray();
             return new NativeArray<T>.Enumerator(ref array);
         }
-        
+
         IEnumerator IEnumerable.GetEnumerator() { throw new NotImplementedException(); }
         IEnumerator<T> IEnumerable<T>.GetEnumerator() { throw new NotImplementedException(); }
 
+        /// <summary>
+        /// Copies the buffer into a new native array.
+        /// </summary>
+        /// <example>
+        /// <code source="../../DocCodeSamples.Tests/DynamicBufferExamples.cs" language="csharp" region="dynamicbuffer.tonativearray"/>
+        /// </example>
+        /// <param name="allocator">The type of memory allocation to use when creating the
+        /// native array.</param>
+        /// <returns>A native array containing copies of the buffer elements.</returns>
         public NativeArray<T> ToNativeArray(Allocator allocator)
         {
             return new NativeArray<T>(AsNativeArray(), allocator);
         }
 
+        /// <summary>
+        /// Copies all the elements from the specified native array into this dynamic buffer.
+        /// </summary>
+        /// <example>
+        /// <code source="../../DocCodeSamples.Tests/DynamicBufferExamples.cs" language="csharp" region="dynamicbuffer.copyfrom.nativearray"/>
+        /// </example>
+        /// <param name="v">The native array containing the elements to copy.</param>
         public void CopyFrom(NativeArray<T> v)
         {
             ResizeUninitialized(v.Length);
             AsNativeArray().CopyFrom(v);
         }
 
+        /// <summary>
+        /// Copies all the elements from another dynamic buffer.
+        /// </summary>
+        /// <example>
+        /// <code source="../../DocCodeSamples.Tests/DynamicBufferExamples.cs" language="csharp" region="dynamicbuffer.copyfrom.dynamicbuffer"/>
+        /// </example>
+        /// <param name="v">The dynamic buffer containing the elements to copy.</param>
         public void CopyFrom(DynamicBuffer<T> v)
         {
             ResizeUninitialized(v.Length);
@@ -314,6 +516,14 @@ namespace Unity.Entities
                 BufferHeader.GetElementPointer(v.m_Buffer), Length * UnsafeUtility.SizeOf<T>());
         }
 
+        /// <summary>
+        /// Copies all the elements from an array.
+        /// </summary>
+        /// <example>
+        /// <code source="../../DocCodeSamples.Tests/DynamicBufferExamples.cs" language="csharp" region="dynamicbuffer.copyfrom.array"/>
+        /// </example>
+        /// <param name="v">A C# array containing the elements to copy.</param>
+        /// <exception cref="ArgumentNullException"></exception>
         public void CopyFrom(T[] v)
         {
             if(v == null)

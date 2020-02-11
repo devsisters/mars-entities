@@ -24,6 +24,7 @@ public class BlobTests : ECSTestsFixture
         public float embeddedFloat;
         public BlobArray<BlobArray<int>> nestedArray;
         public BlobString str;
+        public BlobString emptyStr;
     }
 
     static unsafe BlobAssetReference<MyData> ConstructBlobData()
@@ -40,6 +41,7 @@ public class BlobTests : ECSTestsFixture
         var nestedArray1 = builder.Allocate(ref nestedArrays[1], 2);
 
         builder.AllocateString(ref root.str, "Blah");
+        builder.AllocateString(ref root.emptyStr, "");
 
         nestedArray0[0] = 0;
         nestedArray1[0] = 1;
@@ -96,6 +98,9 @@ public class BlobTests : ECSTestsFixture
         var str = root.str.ToString();
         if ("Blah" != str)
             throw new AssertionException("ValidateBlobData didn't match");
+        var emptyStr = root.emptyStr.ToString();
+        if ("" != emptyStr)
+            throw new AssertionException("ValidateBlobData didn't match");
     }
 
 
@@ -123,7 +128,7 @@ public class BlobTests : ECSTestsFixture
         var blob = ConstructBlobData();
         ValidateBlobData(ref blob.Value);
 
-        blob.Release();
+        blob.Dispose();
     }
 
     [Test]
@@ -131,7 +136,7 @@ public class BlobTests : ECSTestsFixture
     {
         var blob = ConstructBlobData();
         var blobCopy = blob;
-        blob.Release();
+        blob.Dispose();
         
         Assert.Throws<InvalidOperationException>(() => { blobCopy.GetUnsafePtr(); });
         Assert.IsTrue(blob.GetUnsafePtr() == null);
@@ -139,8 +144,8 @@ public class BlobTests : ECSTestsFixture
         Assert.Throws<InvalidOperationException>(() => { var p = blobCopy.Value.embeddedFloat; });
         Assert.Throws<InvalidOperationException>(() => { var p = blobCopy.Value.embeddedFloat; });
 
-        Assert.Throws<InvalidOperationException>(() => { blobCopy.Release(); });
-        Assert.Throws<InvalidOperationException>(() => { blob.Release(); });
+        Assert.Throws<InvalidOperationException>(() => { blobCopy.Dispose(); });
+        Assert.Throws<InvalidOperationException>(() => { blob.Dispose(); });
     }
 
     struct ComponentWithBlobData : IComponentData
@@ -157,7 +162,7 @@ public class BlobTests : ECSTestsFixture
         {
             var blobData = ConstructBlobData();
             ValidateBlobData(ref blobData.Value);
-            blobData.Release();            
+            blobData.Dispose();            
         }
     }
 
@@ -174,7 +179,7 @@ public class BlobTests : ECSTestsFixture
         public void Execute(ref ComponentWithBlobData data)
         {
             ValidateBlobData(ref data.blobAsset.Value);
-            data.blobAsset.Release();
+            data.blobAsset.Dispose();
             data.DidSucceed = true;
         }
     }
@@ -227,7 +232,7 @@ public class BlobTests : ECSTestsFixture
 
         jobHandle.Complete();
 
-        blob.Release();
+        blob.Dispose();
     }
 
     [Test]
@@ -235,7 +240,7 @@ public class BlobTests : ECSTestsFixture
     {
         var blob = CreateSharedBlob();
 
-        blob.Release();
+        blob.Dispose();
 
         var jobData = new ValidateBlobInComponentJob();
         jobData.ExpectException = true;
@@ -257,26 +262,10 @@ public class BlobTests : ECSTestsFixture
         Assert.IsTrue(blob1 == temp1);
         Assert.IsTrue(blob2 != temp1);
 
-        blob1.Release();
-        blob2.Release();
+        blob1.Dispose();
+        blob2.Dispose();
     }
-    
-    [Test]
-    public void AllocateThrowsWhenCopiedByValue()
-    {
-        var builder = new BlobBuilder(Allocator.Temp);
 
-        Assert.Throws<InvalidOperationException>(() =>
-        {
-            var root = builder.ConstructRoot<MyData>();
-
-            // Throw here because root was copied by value instead of ref
-            builder.Allocate(ref root.floatArray, 3);
-        });
-
-        builder.Dispose();
-    }
-    
     [Test]
     public void SourceBlobArrayThrowsOnIndex()
     {
@@ -293,6 +282,18 @@ public class BlobTests : ECSTestsFixture
         });
 
         builder.Dispose();
+    }
+
+    [Test]
+    public void BlobArrayToArrayCopiesResults()
+    {
+        var blob = ConstructBlobData();
+        ref MyData root = ref blob.Value;
+
+        var floatArray = root.floatArray.ToArray();
+        Assert.AreEqual(new float[]{ 0, 1, 2 }, floatArray);
+
+        blob.Dispose();
     }
 
     [Test]
@@ -321,15 +322,15 @@ public class BlobTests : ECSTestsFixture
         public BlobArray<int> intArray;
     }
 
+    static unsafe void AssertAlignment(void* p, int alignment)
+    {
+        ulong mask = (ulong) alignment - 1;
+        Assert.IsTrue(((ulong) (IntPtr) p & mask) == 0);
+    }
+
     [Test]
     public unsafe void BasicAlignmentWorks()
     {
-        void AssertAlignment(void* p, int alignment)
-        {
-            ulong mask = (ulong) alignment - 1;
-            Assert.IsTrue(((ulong) (IntPtr) p & mask) == 0);
-        }
-
         var builder = new BlobBuilder(Allocator.Temp);
         ref var root = ref builder.ConstructRoot<BlobArray<AlignmentTest>>();
         Assert.AreEqual(4, UnsafeUtility.AlignOf<int>());
@@ -354,7 +355,14 @@ public class BlobTests : ECSTestsFixture
             AssertAlignment(blob.Value[x].intArray.GetUnsafePtr(), 4);
         }
 
-        blob.Release();
+        blob.Dispose();
+    }
+
+    [Test]
+    public unsafe void CreatedBlobsAre16ByteAligned()
+    {
+        var blobAssetReference = BlobAssetReference<int>.Create(42);
+        AssertAlignment(blobAssetReference.GetUnsafePtr(), 16);
     }
 
     [Test]
@@ -387,7 +395,7 @@ public class BlobTests : ECSTestsFixture
         for (int i = 0; i < count; i++)
             Assert.AreEqual(i, blob.Value[i]);
 
-        blob.Release();
+        blob.Dispose();
     }
 
     [Test]
@@ -433,7 +441,7 @@ public class BlobTests : ECSTestsFixture
             }
         }
 
-        blob.Release();
+        blob.Dispose();
     }
 
 
@@ -469,7 +477,7 @@ public class BlobTests : ECSTestsFixture
                 Assert.AreEqual(i, blob.Value.intArray[i]);
         }
 
-        blob.Release();
+        blob.Dispose();
     }
 
     BlobAssetReference<MyData> CreateSharedBlob()

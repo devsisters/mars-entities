@@ -552,7 +552,7 @@ namespace Unity.Entities.Tests
 	    }
 
 	    [Test]
-	    [StandaloneFixme] // IJob
+	    [StandaloneFixme] // After NativeJobs and CheckDidSyncFence in Runtime
 	    public void BufferInvalidationNotPossibleWhenArraysAreGivenToJobs()
 	    {
 	        var original = m_Manager.CreateEntity(typeof(EcsIntStateElement));
@@ -587,7 +587,6 @@ namespace Unity.Entities.Tests
 	    }
 
 	    [Test]
-	    [StandaloneFixme] // IJob
 	    public void ReadWriteDynamicBuffer()
 	    {
 	        var original = m_Manager.CreateEntity(typeof(EcsIntStateElement));
@@ -644,20 +643,19 @@ namespace Unity.Entities.Tests
 	    }
 
 	    [Test]
-	    [StandaloneFixme] // IJob
+	    [StandaloneFixme] // After NativeJobs
 	    public void ReadOnlyDynamicBufferReadOnly()
 	    {
 	        ReadOnlyDynamicBufferImpl(true);
 	    }
 
-#if UNITY_2019_3_OR_NEWER
 	    [Test]
-        [StandaloneFixme] // IJob        
+        [StandaloneFixme] // After NativeJobs
         public void ReadOnlyDynamicBufferWritable()
 	    {
 	        ReadOnlyDynamicBufferImpl(false);
 	    }
-#endif
+
 	    struct BufferConsumingJob : IJob
 	    {
 	        public DynamicBuffer<EcsIntStateElement> Buffer;
@@ -668,7 +666,7 @@ namespace Unity.Entities.Tests
 	    }
 
 	    [Test]
-	    [StandaloneFixme] // IJob
+	    [StandaloneFixme] // After NativeJobs
 	    public void BufferInvalidationNotPossibleWhenBuffersAreGivenToJobs()
 	    {
 	        var original = m_Manager.CreateEntity(typeof(EcsIntStateElement));
@@ -700,7 +698,7 @@ namespace Unity.Entities.Tests
 	    }
 
 	    [Test]
-	    [StandaloneFixme] // IJob
+	    [StandaloneFixme] // After NativeJobs
 	    public void NativeArrayInJobReadOnly()
 	    {
 	        var original = m_Manager.CreateEntity(typeof(EcsIntStateElement));
@@ -848,7 +846,7 @@ namespace Unity.Entities.Tests
             var entity = m_Manager.CreateEntity(typeof(EcsIntElement));
             var buffer = m_Manager.GetBuffer<EcsIntElement>(entity);
 
-            buffer.Reserve(100);
+            buffer.EnsureCapacity(100);
 
             Assert.AreEqual(100, buffer.Capacity);
             Assert.AreEqual(0, buffer.Length);

@@ -61,7 +61,7 @@ namespace Unity.Entities
             {
                 var chunk = chunks[i];
                 var entities = chunk.GetNativeArray(entityType);
-                array.Slice(offset, entities.Length).CopyFrom(entities);
+                array.Slice(offset, entities.Length).CopyFrom(entities);    
                 offset += entities.Length;
             }
 
@@ -84,6 +84,8 @@ namespace Unity.Entities
 
             public void PoisonUnusedDataInAllChunks(EntityArchetype archetype, byte value)
             {
+                Unity.Entities.EntityComponentStore.AssertValidArchetype(m_Manager.EntityComponentStore, archetype);
+
                 for (var i = 0; i < archetype.Archetype->Chunks.Count; ++i)
                 {
                     var chunk = archetype.Archetype->Chunks.p[i];
@@ -129,6 +131,18 @@ namespace Unity.Entities
                     allEntities.Dispose();
                     return count;
                 }
+            }
+
+            public bool UseMemoryInitPattern
+            {
+                get => m_Manager.EntityComponentStore->useMemoryInitPattern != 0;
+                set => m_Manager.EntityComponentStore->useMemoryInitPattern = value ? (byte)1 : (byte)0;
+            }
+
+            public byte MemoryInitPattern
+            {
+                get => m_Manager.EntityComponentStore->memoryInitPattern;
+                set => m_Manager.EntityComponentStore->memoryInitPattern = value;
             }
 
             internal Entity GetMetaChunkEntity(Entity entity)
@@ -182,11 +196,16 @@ namespace Unity.Entities
                 var typeInfo = TypeManager.GetTypeInfo(type.TypeIndex);
                 if (typeInfo.Category == TypeManager.TypeCategory.ComponentData)
                 {
+                    if (TypeManager.IsManagedComponent(typeInfo.TypeIndex))
+                    {
+                        return m_Manager.GetManagedComponentDataAsObject(entity, type);
+                    }
+
                     var obj = Activator.CreateInstance(TypeManager.GetType(type.TypeIndex));
                     if (!typeInfo.IsZeroSized)
                     {
                         ulong handle;
-                        var ptr = (byte*) UnsafeUtility.PinGCObjectAndGetAddress(obj, out handle);
+                        var ptr = (byte*)UnsafeUtility.PinGCObjectAndGetAddress(obj, out handle);
                         ptr += TypeManager.ObjectOffset;
                         var src = m_Manager.EntityComponentStore->GetComponentDataWithTypeRO(entity, type.TypeIndex);
                         UnsafeUtility.MemCpy(ptr, src, TypeManager.GetTypeInfo(type.TypeIndex).SizeInChunk);
@@ -241,9 +260,7 @@ namespace Unity.Entities
                 //@TODO: Validate from perspective of chunkquery...
                 m_Manager.EntityComponentStore->CheckInternalConsistency();
 
-                Assert.IsTrue(
-                    m_Manager.ManagedComponentStore.AllSharedComponentReferencesAreFromChunks(m_Manager
-                        .EntityComponentStore));
+                Assert.IsTrue(m_Manager.ManagedComponentStore.AllSharedComponentReferencesAreFromChunks(m_Manager.EntityComponentStore));
                 m_Manager.ManagedComponentStore.CheckInternalConsistency();
 
                 var chunkQuery = m_Manager.CreateEntityQuery(new EntityQueryDesc

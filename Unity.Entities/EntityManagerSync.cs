@@ -16,20 +16,26 @@ namespace Unity.Entities
         /// <remarks>Calling CompleteAllJobs() blocks the main thread until all currently running Jobs finish.</remarks>
         public void CompleteAllJobs()
         {
-            ComponentJobSafetyManager->CompleteAllJobsAndInvalidateArrays();
+            DependencyManager->CompleteAllJobsAndInvalidateArrays();
         }
 
         // ----------------------------------------------------------------------------------------------------------
         // INTERNAL
         // ----------------------------------------------------------------------------------------------------------
 
-        private void BeforeStructuralChange()
+        internal void BeforeStructuralChange()
         {
 #if ENABLE_UNITY_COLLECTIONS_CHECKS
-            if (ComponentJobSafetyManager->IsInTransaction)
+            if (DependencyManager->IsInTransaction)
             {
                 throw new InvalidOperationException(
                     "Access to EntityManager is not allowed after EntityManager.BeginExclusiveEntityTransaction(); has been called.");
+            }
+
+            if (DependencyManager->IsInForEachDisallowStructuralChange != 0)
+            {
+                throw new InvalidOperationException(
+                    "Structural changes are not allowed during Entities.ForEach. Please use EntityCommandBuffer instead.");
             }
 
             // This is not an end user error. If there are any managed changes at this point, it indicates there is some

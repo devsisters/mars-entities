@@ -45,53 +45,26 @@ namespace Unity.Entities
         [EditorBrowsable(EditorBrowsableState.Never)]
         public interface IBaseJobForEach
         {
+            // code-gen:
+            // ComponentType[] GetComponentTypes_Gen(out int processCount, out ComponentType[] changedFilter);
+            // IntPtr GetJobReflection_Gen(bool isParallelFor);
         }
 
-#if UNITY_DOTSPLAYER
-        static internal void DoDeallocateOnJobCompletion(object jobData)
-        {
-            throw new CodegenShouldReplaceException();
-        }
-
-        public static JobHandle Schedule<T>(this T jobData, EntityQuery query, JobHandle dependsOn = default(JobHandle))
+        static ComponentType[] GetComponentTypes<T>(this T self, out int processCount, out ComponentType[] changedFilter)
             where T : struct, IBaseJobForEach
         {
-            throw new CodegenShouldReplaceException();
+            // code-gen:
+            // return self.GetComponentTypes_Gen(out processCount, out changedFilter);
+            throw new Exception("Should be replaced by code-gen.");
         }
 
-        public static JobHandle Run<T>(this T jobData, EntityQuery query, JobHandle dependsOn = default(JobHandle))
+        static IntPtr GetJobReflection<T>(this T self, bool isParallelFor)
             where T : struct, IBaseJobForEach
         {
-            throw new CodegenShouldReplaceException();
+            // code-gen:
+            // return self.GetJobReflection_Gen(isParallelFor);
+            throw new Exception("Should be replaced by code-gen.");
         }
-
-        public static JobHandle ScheduleSingle<T>(this T jobData, EntityQuery query, JobHandle dependsOn = default(JobHandle))
-            where T : struct, IBaseJobForEach
-        {
-            throw new CodegenShouldReplaceException();
-        }
-
-
-        public unsafe static JobHandle Schedule<TJob>(this TJob job, ComponentSystemBase system, JobHandle dependsOn = default(JobHandle))
-            where TJob : struct, IBaseJobForEach
-        {
-            throw new CodegenShouldReplaceException();
-        }
-
-        public unsafe static JobHandle Run<TJob>(this TJob job, ComponentSystemBase system, JobHandle dependsOn = default(JobHandle))
-            where TJob : struct, IBaseJobForEach
-        {
-            throw new CodegenShouldReplaceException();
-        }
-
-        public unsafe static JobHandle ScheduleSingle<TJob>(this TJob job, ComponentSystemBase system, JobHandle dependsOn = default(JobHandle))
-            where TJob : struct, IBaseJobForEach
-        {
-            throw new CodegenShouldReplaceException();
-        }
-
-#endif
-
 
 #if !UNITY_DOTSPLAYER
         static ComponentType[] GetComponentTypes(Type jobType)
@@ -196,21 +169,32 @@ namespace Unity.Entities
             var types = GetComponentTypes(jobType, iType, out processTypesCount, out filterChanged);
             system.GetEntityQueryInternal(types);
         }
-
-        static unsafe void Initialize(ComponentSystemBase system, EntityQuery entityQuery, Type jobType, Type wrapperJobType,
-            bool isParallelFor, ref JobForEachCache cache, out ProcessIterationData iterator)
+#endif
+        static unsafe void Initialize<T>(ComponentSystemBase system, EntityQuery entityQuery, Type jobType, Type wrapperJobType,
+            bool isParallelFor, ref JobForEachCache cache, out ProcessIterationData iterator, ref T jobData)
+            where T : struct
+#if UNITY_DOTSPLAYER
+                    , IBaseJobForEach
+#endif
         {
         // Get the job reflection data and cache it if we don't already have it cached.
             if (isParallelFor && cache.JobReflectionDataParallelFor == IntPtr.Zero ||
                 !isParallelFor && cache.JobReflectionData == IntPtr.Zero)
             {
+#if UNITY_DOTSPLAYER
+                if (cache.Types == null)
+                {
+                    cache.Types = jobData.GetComponentTypes(out cache.ProcessTypesCount, out cache.FilterChanged);
+                }
+                var res = jobData.GetJobReflection(isParallelFor);
+#else
                 var iType = GetIJobForEachInterface(jobType);
                 if (cache.Types == null)
                     cache.Types = GetComponentTypes(jobType, iType, out cache.ProcessTypesCount,
                         out cache.FilterChanged);
 
                 var res = GetJobReflection(jobType, wrapperJobType, iType, isParallelFor);
-
+#endif
                 if (isParallelFor)
                     cache.JobReflectionDataParallelFor = res;
                 else
@@ -226,7 +210,7 @@ namespace Unity.Entities
 
                     // If the cached filter has changed, update the newly cached EntityQuery with those changes.
                     if (cache.FilterChanged.Length != 0)
-                        cache.EntityQuery.SetFilterChanged(cache.FilterChanged);
+                        cache.EntityQuery.SetChangedVersionFilter(cache.FilterChanged);
 
                     // Otherwise, just reset our newly cached EntityQuery's filter.
                     else
@@ -264,7 +248,7 @@ namespace Unity.Entities
             iterator.m_IsParallelFor = isParallelFor;
             iterator.m_Length = query.CalculateChunkCountWithoutFiltering();
 
-            iterator.GlobalSystemVersion = query.GetComponentChunkIterator().m_GlobalSystemVersion;
+            iterator.GlobalSystemVersion = query._EntityComponentStore->GlobalSystemVersion;
 
 #if ENABLE_UNITY_COLLECTIONS_CHECKS
             iterator.m_MaxIndex = iterator.m_Length - 1;
@@ -378,6 +362,7 @@ namespace Unity.Entities
 #endif
         }
 
+#if !UNITY_DOTSPLAYER
         public static EntityQuery GetEntityQueryForIJobForEach(this ComponentSystemBase system,
             Type jobType)
         {
@@ -390,7 +375,6 @@ namespace Unity.Entities
 
         //NOTE: It would be much better if C# could resolve the branch with generic resolving,
         //      but apparently the interface constraint is not enough..
-
         public static void PrepareEntityQuery<T>(this T jobData, ComponentSystemBase system)
             where T : struct, IBaseJobForEach
         {

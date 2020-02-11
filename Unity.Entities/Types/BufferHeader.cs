@@ -28,36 +28,65 @@ namespace Unity.Entities
             RetainOldData
         }
 
-        public static void EnsureCapacity(BufferHeader* header, int count, int typeSize, int alignment, TrashMode trashMode)
+        public static void EnsureCapacity(BufferHeader* header, int count, int typeSize, int alignment, TrashMode trashMode, bool useMemoryInitPattern, byte memoryInitPattern)
         {
-            if (header->Capacity >= count)
+            if (count <= header->Capacity)
+                return;
+            var adjustedCount = Math.Max(kMinimumCapacity, Math.Max(2 * header->Capacity, count)); // stop pathological performance of ++Capacity allocating every time, tiny Capacities
+            SetCapacity(header, adjustedCount, typeSize, alignment, trashMode, useMemoryInitPattern, memoryInitPattern, 0);
+        }
+        
+
+        public static void SetCapacity(BufferHeader* header, int count, int typeSize, int alignment, TrashMode trashMode, bool useMemoryInitPattern, byte memoryInitPattern, int internalCapacity)
+        {
+            var newCapacity = count;
+            if (newCapacity == header->Capacity)
                 return;
 
-            int newCapacity = Math.Max(Math.Max(2 * header->Capacity, count), kMinimumCapacity);
-            long newBlockSize = (long)newCapacity * typeSize;
+            long newSizeInBytes = (long)newCapacity * typeSize;
 
             byte* oldData = GetElementPointer(header);
-            byte* newData = (byte*) UnsafeUtility.Malloc(newBlockSize, alignment, Allocator.Persistent);
+            byte* newData = (newCapacity <= internalCapacity) ? (byte*)(header + 1) : (byte*) UnsafeUtility.Malloc(newSizeInBytes, alignment, Allocator.Persistent);
 
-            if (trashMode == TrashMode.RetainOldData)
+            if (oldData != newData) // if at least one of them isn't the internal pointer...
             {
-                long oldBlockSize = (long)header->Capacity * typeSize;
-                UnsafeUtility.MemCpy(newData, oldData, oldBlockSize);
+#if ENABLE_UNITY_COLLECTIONS_CHECKS
+                if (useMemoryInitPattern)
+                {
+                    if (trashMode == TrashMode.RetainOldData)
+                    {
+                        var oldSizeInBytes = (header->Capacity * typeSize);
+                        var bytesToInitialize = newSizeInBytes - oldSizeInBytes;
+                        if (bytesToInitialize > 0)
+                        {
+                            UnsafeUtility.MemSet(newData + oldSizeInBytes, memoryInitPattern, bytesToInitialize);
+                        }
+                    }
+                    else
+                    {
+                        UnsafeUtility.MemSet(newData, memoryInitPattern, newSizeInBytes);
+                    }
+                }
+#endif
+                if (trashMode == TrashMode.RetainOldData)
+                {
+                    long bytesToCopy = Math.Min((long) header->Capacity, count) * typeSize;
+                    UnsafeUtility.MemCpy(newData, oldData, bytesToCopy);
+                }
+                // Note we're freeing the old buffer only if it was not using the internal capacity. Don't change this to 'oldData', because that would be a bug.
+                if (header->Pointer != null)
+                {
+                    UnsafeUtility.Free(header->Pointer, Allocator.Persistent);
+                }
             }
 
-            // Note we're freeing the old buffer only if it was not using the internal capacity. Don't change this to 'oldData', because that would be a bug.
-            if (header->Pointer != null)
-            {
-                UnsafeUtility.Free(header->Pointer, Allocator.Persistent);
-            }
-
-            header->Pointer = newData;
+            header->Pointer = (newData == (byte*)(header + 1)) ? null : newData;
             header->Capacity = newCapacity;
         }
 
-        public static void Assign(BufferHeader* header, byte* source, int count, int typeSize, int alignment)
+        public static void Assign(BufferHeader* header, byte* source, int count, int typeSize, int alignment, bool useMemoryInitPattern, byte memoryInitPattern)
         {
-            EnsureCapacity(header, count, typeSize, alignment, TrashMode.TrashOldData);
+            EnsureCapacity(header, count, typeSize, alignment, TrashMode.TrashOldData, useMemoryInitPattern, memoryInitPattern);
 
             // Select between internal capacity buffer and heap buffer.
             byte* elementPtr = GetElementPointer(header);

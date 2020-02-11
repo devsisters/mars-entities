@@ -14,12 +14,12 @@ namespace Unity.Entities
 
         public void CreateEntities(Archetype* archetype, Entity* entities, int count)
         {
-            var sharedComponentValues = stackalloc int[archetype->NumSharedComponents];
-            UnsafeUtility.MemClear(sharedComponentValues, archetype->NumSharedComponents * sizeof(int));
+            var archetypeChunkFilter = new ArchetypeChunkFilter();
+            archetypeChunkFilter.Archetype = archetype;
 
             while (count != 0)
             {
-                var chunk = GetChunkWithEmptySlots(archetype, sharedComponentValues);
+                var chunk = GetChunkWithEmptySlots(ref archetypeChunkFilter);
 
                 int allocatedIndex;
                 var allocatedCount = AllocateIntoChunk(chunk, count, out allocatedIndex);
@@ -35,11 +35,11 @@ namespace Unity.Entities
 
         public void DestroyEntities(NativeArray<ArchetypeChunk> chunkArray)
         {
-            var chunks = (ArchetypeChunk*) chunkArray.GetUnsafeReadOnlyPtr();
+            var chunks = (ArchetypeChunk*)chunkArray.GetUnsafeReadOnlyPtr();
             for (int i = 0; i != chunkArray.Length; i++)
             {
                 var chunk = chunks[i].m_Chunk;
-                DestroyBatch((Entity*) chunk->Buffer, chunk, 0, chunk->Count);
+                DestroyBatch((Entity*)chunk->Buffer, chunk, 0, chunk->Count);
             }
         }
 
@@ -76,7 +76,7 @@ namespace Unity.Entities
             // Apply additional destroys from any LinkedEntityGroup
             if (additionalDestroyList.Ptr != null)
             {
-                var additionalDestroyPtr = (Entity*) additionalDestroyList.Ptr;
+                var additionalDestroyPtr = (Entity*)additionalDestroyList.Ptr;
                 // Optimal for destruction speed is if entities with same archetype/chunk are followed one after another.
                 // So we lay out the to be destroyed objects assuming that the destroyed entities are "similar":
                 // Reorder destruction by index in entityGroupArray...
@@ -85,7 +85,7 @@ namespace Unity.Entities
                 ///      Figure out how to make this more general purpose.
                 if (minDestroyStride == maxDestroyStride)
                 {
-                    var reordered = (Entity*) UnsafeUtility.Malloc(additionalDestroyList.Length * sizeof(Entity), 16,
+                    var reordered = (Entity*)UnsafeUtility.Malloc(additionalDestroyList.Length * sizeof(Entity), 16,
                         Allocator.TempJob);
                     int batchCount = additionalDestroyList.Length / minDestroyStride;
                     for (int i = 0; i != batchCount; i++)
@@ -110,7 +110,6 @@ namespace Unity.Entities
         {
             Assert.AreNotEqual(newCount, chunk->Count);
             Assert.IsFalse(chunk->Locked);
-            Assert.IsTrue(!chunk->LockedEntityOrder || newCount == 0);
 
             // Chunk released to empty chunk pool
             if (newCount == 0)
@@ -144,19 +143,23 @@ namespace Unity.Entities
             if (newCount == 0 && metaChunkEntity != Entity.Null)
                 DestroyMetaChunkEntity(metaChunkEntity);
 
-             SetChunkCountKeepMetaChunk(chunk, newCount);
+            SetChunkCountKeepMetaChunk(chunk, newCount);
         }
 
-        public void CreateChunks(Archetype* archetype, ArchetypeChunk* chunks, int entityCount)
+        public void CreateChunks(Archetype* archetype, ArchetypeChunk* chunks, int chunksCount, int entityCount)
         {
-            fixed (EntityComponentStore* entityComponentStore = &this)
+            fixed(EntityComponentStore* entityComponentStore = &this)
             {
                 int* sharedComponentValues = stackalloc int[archetype->NumSharedComponents];
-                UnsafeUtility.MemClear(sharedComponentValues, archetype->NumSharedComponents * sizeof(int));
 
                 int chunkIndex = 0;
                 while (entityCount != 0)
                 {
+                    #if ENABLE_UNITY_COLLECTIONS_CHECKS
+                    if (chunkIndex >= chunksCount)
+                        throw new System.ArgumentException($"CreateChunks chunks array is not large enough to hold the array of chunks {chunksCount}.");
+                    #endif
+                    
                     var chunk = GetCleanChunk(archetype, sharedComponentValues);
                     int allocatedIndex;
 
@@ -194,43 +197,18 @@ namespace Unity.Entities
             return newChunk;
         }
 
-
         public void InstantiateEntities(Entity srcEntity, Entity* outputEntities, int instanceCount)
         {
             if (HasComponent(srcEntity, m_LinkedGroupType))
             {
-                var header = (BufferHeader*) GetComponentDataWithTypeRO(srcEntity, m_LinkedGroupType);
-                var entityPtr = (Entity*) BufferHeader.GetElementPointer(header);
+                var header = (BufferHeader*)GetComponentDataWithTypeRO(srcEntity, m_LinkedGroupType);
+                var entityPtr = (Entity*)BufferHeader.GetElementPointer(header);
                 var entityCount = header->Length;
 
-#if ENABLE_UNITY_COLLECTIONS_CHECKS
-                if (entityCount == 0 || entityPtr[0] != srcEntity)
-                    throw new ArgumentException("LinkedEntityGroup[0] must always be the Entity itself.");
-                for (int i = 0; i < entityCount; i++)
-                {
-                    if (!Exists(entityPtr[i]))
-                        throw new ArgumentException(
-                            "The srcEntity's LinkedEntityGroup references an entity that is invalid. (Entity at index {i} on the LinkedEntityGroup.)");
-
-                    var archetype = GetArchetype(entityPtr[i]);
-                    if (archetype->InstantiableArchetype == null)
-                        throw new ArgumentException(
-                            "The srcEntity's LinkedEntityGroup references an entity that has already been destroyed. (Entity at index {i} on the LinkedEntityGroup. Only system state components are left on the entity)");
-                }
-#endif
                 InstantiateEntitiesGroup(entityPtr, entityCount, outputEntities, instanceCount);
             }
             else
             {
-#if ENABLE_UNITY_COLLECTIONS_CHECKS
-                if (!Exists(srcEntity))
-                    throw new ArgumentException("srcEntity is not a valid entity");
-
-                var srcArchetype = GetArchetype(srcEntity);
-                if (srcArchetype->InstantiableArchetype == null)
-                    throw new ArgumentException(
-                        "srcEntity is not instantiable because it has already been destroyed. (Only system state components are left on it)");
-#endif
                 InstantiateEntitiesOne(srcEntity, outputEntities, instanceCount, null, 0);
             }
         }
@@ -248,7 +226,7 @@ namespace Unity.Entities
 
             if (remainder > 0)
             {
-                for(int i = available; i < indices.Length; ++i)
+                for (int i = available; i < indices.Length; ++i)
                     indices[i] = m_ManagedArrayIndex + i - available;
 
                 m_ManagedArrayIndex += remainder;
@@ -259,26 +237,7 @@ namespace Unity.Entities
         // ----------------------------------------------------------------------------------------------------------
         // INTERNAL
         // ----------------------------------------------------------------------------------------------------------
-
-        Chunk* GetChunkWithEmptySlots(Archetype* archetype, SharedComponentValues sharedComponentValues)
-        {
-            var chunk = archetype->GetExistingChunkWithEmptySlots(sharedComponentValues);
-            if (chunk == null)
-            {
-                chunk = GetCleanChunk(archetype, sharedComponentValues);
-            }
-
-            return chunk;
-        }
-
-        int AllocateIntoChunk(Chunk* chunk)
-        {
-            int outIndex;
-            var res = AllocateIntoChunk(chunk, 1, out outIndex);
-            Assert.AreEqual(1, res);
-            return outIndex;
-        }
-
+        
         int AllocateIntoChunk(Chunk* chunk, int count, out int outIndex)
         {
             var allocatedCount = Math.Min(chunk->Capacity - chunk->Count, count);
@@ -291,9 +250,8 @@ namespace Unity.Entities
         void DeleteChunk(Chunk* chunk)
         {
             var entityCount = chunk->Count;
-            DeallocateDataEntitiesInChunk((Entity*) chunk->Buffer, chunk, 0, chunk->Count);
-            ManagedChangesTracker.IncrementComponentOrderVersion(chunk->Archetype,
-                chunk->SharedComponentValues);
+            DeallocateDataEntitiesInChunk((Entity*)chunk->Buffer, chunk, 0, chunk->Count);
+            ManagedChangesTracker.IncrementComponentOrderVersion(chunk->Archetype, chunk->SharedComponentValues);
             IncrementComponentTypeOrderVersion(chunk->Archetype);
             chunk->Archetype->EntityCount -= entityCount;
             SetChunkCount(chunk, 0);
@@ -307,12 +265,12 @@ namespace Unity.Entities
 
         void CreateMetaEntityForChunk(Chunk* chunk)
         {
-            fixed (EntityComponentStore* entityComponentStore = &this)
+            fixed(EntityComponentStore* entityComponentStore = &this)
             {
                 CreateEntities(chunk->Archetype->MetaChunkArchetype, &chunk->metaChunkEntity, 1);
 
-                var chunkHeader = (ChunkHeader*) GetComponentDataWithTypeRW(chunk->metaChunkEntity, m_ChunkHeaderType, GlobalSystemVersion);
-                
+                var chunkHeader = (ChunkHeader*)GetComponentDataWithTypeRW(chunk->metaChunkEntity, m_ChunkHeaderType, GlobalSystemVersion);
+
                 chunkHeader->ArchetypeChunk = new ArchetypeChunk(chunk, entityComponentStore);
             }
         }
@@ -335,13 +293,13 @@ namespace Unity.Entities
                 var stride = chunk->Archetype->SizeOfs[indexInArchetype];
                 for (int i = 0; i != batchCount; i++)
                 {
-                    var header = (BufferHeader*) (baseHeader + stride * i);
+                    var header = (BufferHeader*)(baseHeader + stride * i);
 
                     var entityGroupCount = header->Length - 1;
-                    if (entityGroupCount == 0)
+                    if (entityGroupCount <= 0)
                         continue;
 
-                    var entityGroupArray = (Entity*) BufferHeader.GetElementPointer(header) + 1;
+                    var entityGroupArray = (Entity*)BufferHeader.GetElementPointer(header) + 1;
 
                     if (entitiesList.Capacity == 0)
                         entitiesList.SetCapacity<Entity>(inputDestroyCount * entityGroupCount /*, Allocator.TempJob*/);
@@ -359,8 +317,7 @@ namespace Unity.Entities
             if (!archetype->SystemStateCleanupNeeded)
             {
                 DeallocateDataEntitiesInChunk(entities, chunk, indexInChunk, batchCount);
-                ManagedChangesTracker.IncrementComponentOrderVersion(archetype,
-                    chunk->SharedComponentValues);
+                ManagedChangesTracker.IncrementComponentOrderVersion(archetype, chunk->SharedComponentValues);
                 IncrementComponentTypeOrderVersion(archetype);
 
                 if (chunk->ManagedArrayIndex >= 0)
@@ -380,40 +337,18 @@ namespace Unity.Entities
             }
             else
             {
-                var newType = archetype->SystemStateResidueArchetype;
+                var dstArchetypeChunkFilter = new ArchetypeChunkFilter();
+                dstArchetypeChunkFilter.Archetype = archetype->SystemStateResidueArchetype;
 
-                var sharedComponentValues = chunk->SharedComponentValues;
-
-                if (RequiresBuildingResidueSharedComponentIndices(archetype, newType))
+                if (RequiresBuildingResidueSharedComponentIndices(archetype, dstArchetypeChunkFilter.Archetype))
                 {
-                    var tempAlloc = stackalloc int[newType->NumSharedComponents];
-                    BuildResidueSharedComponentIndices(archetype, newType, sharedComponentValues, tempAlloc);
-                    sharedComponentValues = tempAlloc;
+                    BuildResidueSharedComponentIndices(archetype, dstArchetypeChunkFilter.Archetype, chunk->SharedComponentValues, dstArchetypeChunkFilter.SharedComponentValues);
                 }
-
-                // See: https://github.com/Unity-Technologies/dots/issues/1387
-                // For Locked Order Chunks specfically, need to make sure that structural changes are always done per-chunk.
-                // If trying to muutate structure in a way that is not per chunk, will hit an exception in the else clause anyway.
-                // This ultimately needs to be replaced by entity batch interface.
 
                 if (batchCount == chunk->Count)
-                {
-                    ManagedChangesTracker.IncrementComponentOrderVersion(archetype,
-                        chunk->SharedComponentValues);
-                    IncrementComponentTypeOrderVersion(archetype);
-
-                    SetArchetype(chunk, newType, sharedComponentValues);
-                }
-                else
-                {
-                    for (var i = 0; i < batchCount; i++)
-                    {
-                        var entity = entities[i];
-                        ManagedChangesTracker.IncrementComponentOrderVersion(archetype, GetChunk(entity)->SharedComponentValues);
-                        IncrementComponentTypeOrderVersion(archetype);
-                        SetArchetype(entity, newType, sharedComponentValues);
-                    }
-                }
+                    Move(chunk, ref dstArchetypeChunkFilter);
+                else 
+                    Move(new EntityBatchInChunk {Chunk = chunk, StartIndex = indexInChunk, Count = batchCount}, ref dstArchetypeChunkFilter);
             }
         }
 
@@ -421,7 +356,7 @@ namespace Unity.Entities
             Archetype* dstArchetype)
         {
             return dstArchetype->NumSharedComponents > 0 &&
-                   dstArchetype->NumSharedComponents != srcArchetype->NumSharedComponents;
+                dstArchetype->NumSharedComponents != srcArchetype->NumSharedComponents;
         }
 
         void BuildResidueSharedComponentIndices(Archetype* srcArchetype, Archetype* dstArchetype,
@@ -468,33 +403,31 @@ namespace Unity.Entities
             FreeChunk(chunk);
         }
 
-        int InstantiateEntitiesOne(Entity srcEntity, Entity* outputEntities,
-            int instanceCount, InstantiateRemapChunk* remapChunks, int remapChunksCount)
+        int InstantiateEntitiesOne(Entity srcEntity, Entity* outputEntities, int instanceCount, InstantiateRemapChunk* remapChunks, int remapChunksCount)
         {
             var src = GetEntityInChunk(srcEntity);
             var srcArchetype = src.Chunk->Archetype;
             var dstArchetype = srcArchetype->InstantiableArchetype;
 
-            var temp = stackalloc int[dstArchetype->NumSharedComponents];
+            var archetypeChunkFilter = new ArchetypeChunkFilter();
+            archetypeChunkFilter.Archetype = dstArchetype;
+            
             if (RequiresBuildingResidueSharedComponentIndices(srcArchetype, dstArchetype))
             {
-                BuildResidueSharedComponentIndices(srcArchetype, dstArchetype,
-                    src.Chunk->SharedComponentValues, temp);
+                BuildResidueSharedComponentIndices(srcArchetype, dstArchetype, src.Chunk->SharedComponentValues, archetypeChunkFilter.SharedComponentValues);
             }
             else
             {
                 // Always copy shared component indices since GetChunkWithEmptySlots might reallocate the storage of SharedComponentValues
-                src.Chunk->SharedComponentValues.CopyTo(temp, 0, dstArchetype->NumSharedComponents);
+                src.Chunk->SharedComponentValues.CopyTo(archetypeChunkFilter.SharedComponentValues, 0, dstArchetype->NumSharedComponents);
             }
-
-            SharedComponentValues sharedComponentValues = temp;
 
             Chunk* chunk = null;
 
             int instanceBeginIndex = 0;
             while (instanceBeginIndex != instanceCount)
             {
-                chunk = GetChunkWithEmptySlots(dstArchetype, sharedComponentValues);
+                chunk = GetChunkWithEmptySlots(ref archetypeChunkFilter);
 
                 int indexInChunk;
                 var allocatedCount = AllocateIntoChunk(chunk, instanceCount - instanceBeginIndex, out indexInChunk);
@@ -502,12 +435,17 @@ namespace Unity.Entities
                 ChunkDataUtility.ReplicateComponents(src.Chunk, src.IndexInChunk, chunk, indexInChunk, allocatedCount);
                 AllocateEntities(dstArchetype, chunk, indexInChunk, allocatedCount,
                     outputEntities + instanceBeginIndex);
+
+                if (srcArchetype->NumManagedArrays > 0)
+                {
+                    ManagedChangesTracker.ReplicateManagedObjects(src.Chunk, src.IndexInChunk, chunk, indexInChunk, allocatedCount, srcEntity, outputEntities + instanceBeginIndex);
+                }
+
                 chunk->SetAllChangeVersions(GlobalSystemVersion);
 
 #if UNITY_EDITOR
                 for (var i = 0; i < allocatedCount; ++i)
-                    SetName(outputEntities[i + instanceBeginIndex],
-                        GetName(srcEntity));
+                    CopyName(outputEntities[i + instanceBeginIndex], srcEntity);
 #endif
 
                 if (remapChunks != null)
@@ -525,8 +463,7 @@ namespace Unity.Entities
 
             if (chunk != null)
             {
-                ManagedChangesTracker.IncrementComponentOrderVersion(dstArchetype,
-                    chunk->SharedComponentValues);
+                ManagedChangesTracker.IncrementComponentOrderVersion(dstArchetype, chunk->SharedComponentValues);
                 IncrementComponentTypeOrderVersion(dstArchetype);
             }
 
@@ -539,23 +476,24 @@ namespace Unity.Entities
             int totalCount = srcEntityCount * instanceCount;
 
             var tempAllocSize = sizeof(EntityRemapUtility.SparseEntityRemapInfo) * totalCount +
-                                sizeof(InstantiateRemapChunk) * totalCount + sizeof(Entity) * instanceCount;
+                sizeof(InstantiateRemapChunk) * totalCount + sizeof(Entity) * instanceCount;
             byte* allocation;
             const int kMaxStackAllocSize = 16 * 1024;
 
             if (tempAllocSize > kMaxStackAllocSize)
             {
-                allocation = (byte*) UnsafeUtility.Malloc(tempAllocSize, 16, Allocator.Temp);
+                allocation = (byte*)UnsafeUtility.Malloc(tempAllocSize, 16, Allocator.Temp);
             }
             else
             {
                 var temp = stackalloc byte[tempAllocSize];
+
                 allocation = temp;
             }
 
-            var entityRemap = (EntityRemapUtility.SparseEntityRemapInfo*) allocation;
-            var remapChunks = (InstantiateRemapChunk*) (entityRemap + totalCount);
-            var outputEntities = (Entity*) (remapChunks + totalCount);
+            var entityRemap = (EntityRemapUtility.SparseEntityRemapInfo*)allocation;
+            var remapChunks = (InstantiateRemapChunk*)(entityRemap + totalCount);
+            var outputEntities = (Entity*)(remapChunks + totalCount);
 
             var remapChunksCount = 0;
 
@@ -580,6 +518,7 @@ namespace Unity.Entities
                 }
             }
 
+
             for (int i = 0; i != remapChunksCount; i++)
             {
                 var chunk = remapChunks[i].Chunk;
@@ -590,10 +529,11 @@ namespace Unity.Entities
 
                 var localRemap = entityRemap + instanceBeginIndex * srcEntityCount;
 
-                EntityRemapUtility.PatchEntitiesForPrefab(dstArchetype->ScalarEntityPatches + 1,
-                    dstArchetype->ScalarEntityPatchCount - 1, dstArchetype->BufferEntityPatches,
-                    dstArchetype->BufferEntityPatchCount, chunk->Buffer, indexInChunk, allocatedCount, localRemap,
-                    srcEntityCount);
+                EntityRemapUtility.PatchEntitiesForPrefab(dstArchetype->ScalarEntityPatches + 1, dstArchetype->ScalarEntityPatchCount - 1,
+                    dstArchetype->BufferEntityPatches, dstArchetype->BufferEntityPatchCount,
+                    chunk->Buffer, indexInChunk, allocatedCount, localRemap, srcEntityCount);
+
+                ManagedChangesTracker.PatchEntitiesForPrefab(dstArchetype, chunk, indexInChunk, allocatedCount, localRemap, srcEntityCount, Allocator.Temp);
             }
 
             if (tempAllocSize > kMaxStackAllocSize)
@@ -633,7 +573,7 @@ namespace Unity.Entities
             else
             {
                 Assert.IsTrue(archetype->FreeChunksBySharedComponents.TryGet(chunk->SharedComponentValues,
-                                  archetype->NumSharedComponents) != null);
+                    archetype->NumSharedComponents) != null);
             }
 
             if (archetype->NumManagedArrays > 0)
@@ -690,14 +630,14 @@ namespace Unity.Entities
 
             // updates indexInChunk to point to where the components will be moved to
             //Assert.IsTrue(chunk->archetype->sizeOfs[0] == sizeof(Entity) && chunk->archetype->offsets[0] == 0);
-            var movedEntities = (Entity*) chunk->Buffer + (chunk->Count - patchCount);
+            var movedEntities = (Entity*)chunk->Buffer + (chunk->Count - patchCount);
             for (var i = 0; i != patchCount; i++)
                 m_EntityInChunkByEntity[movedEntities[i].Index].IndexInChunk = indexInChunk + i;
 
             // Move component data from the end to where we deleted components
             ChunkDataUtility.Copy(chunk, chunk->Count - patchCount, chunk, indexInChunk, patchCount);
         }
- 
+
         void DeallocateBuffers(Entity* entities, Chunk* chunk, int batchCount)
         {
             var archetype = chunk->Archetype;
@@ -717,7 +657,7 @@ namespace Unity.Entities
                     Entity e = entities[i];
                     int indexInChunk = m_EntityInChunkByEntity[e.Index].IndexInChunk;
                     byte* bufferPtr = basePtr + stride * indexInChunk;
-                    BufferHeader.Destroy((BufferHeader*) bufferPtr);
+                    BufferHeader.Destroy((BufferHeader*)bufferPtr);
                 }
             }
         }
@@ -766,6 +706,5 @@ namespace Unity.Entities
                 StartIndex = indexInChunk
             };
         }
-
     }
 }

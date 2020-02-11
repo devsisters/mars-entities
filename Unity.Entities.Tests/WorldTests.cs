@@ -2,6 +2,7 @@ using System;
 using System.Linq;
 using System.Reflection;
 using NUnit.Framework;
+using Unity.Core;
 
 namespace Unity.Entities.Tests
 {
@@ -12,27 +13,26 @@ namespace Unity.Entities.Tests
         [SetUp]
         public virtual void Setup()
         {
-            m_PreviousWorld = World.Active;
+            m_PreviousWorld = World.DefaultGameObjectInjectionWorld;
         }
 
         [TearDown]
         public virtual void TearDown()
         {
-            World.Active = m_PreviousWorld;
+            World.DefaultGameObjectInjectionWorld = m_PreviousWorld;
         }
 
 
         [Test]
-        [StandaloneFixme]
         public void ActiveWorldResets()
         {
             int count = World.AllWorlds.Count();
             var worldA = new World("WorldA");
             var worldB = new World("WorldB");
 
-            World.Active = worldB;
+            World.DefaultGameObjectInjectionWorld = worldB;
 
-            Assert.AreEqual(worldB, World.Active);
+            Assert.AreEqual(worldB, World.DefaultGameObjectInjectionWorld);
             Assert.AreEqual(count + 2, World.AllWorlds.Count());
             Assert.AreEqual(worldA, World.AllWorlds[World.AllWorlds.Count()-2]);
             Assert.AreEqual(worldB, World.AllWorlds[World.AllWorlds.Count()-1]);
@@ -41,7 +41,7 @@ namespace Unity.Entities.Tests
 
             Assert.IsFalse(worldB.IsCreated);
             Assert.IsTrue(worldA.IsCreated);
-            Assert.AreEqual(null, World.Active);
+            Assert.AreEqual(null, World.DefaultGameObjectInjectionWorld);
 
             worldA.Dispose();
 
@@ -54,7 +54,6 @@ namespace Unity.Entities.Tests
         }
 
         [Test]
-        [StandaloneFixme]
         public void WorldVersionIsConsistent()
         {
             var world = new World("WorldX");
@@ -77,7 +76,6 @@ namespace Unity.Entities.Tests
         }
 
         [Test]
-        [StandaloneFixme]
         public void UsingDisposedWorldThrows()
         {
             var world = new World("WorldX");
@@ -91,7 +89,7 @@ namespace Unity.Entities.Tests
             public AddWorldDuringConstructorThrowsSystem()
             {
                 Assert.AreEqual(null, World);
-                World.Active.AddSystem(this);
+                World.DefaultGameObjectInjectionWorld.AddSystem(this);
             }
 
             protected override void OnUpdate() { }
@@ -101,7 +99,7 @@ namespace Unity.Entities.Tests
         public void AddWorldDuringConstructorThrows ()
         {
             var world = new World("WorldX");
-            World.Active = world;
+            World.DefaultGameObjectInjectionWorld = world;
             // Adding a manager during construction is not allowed
             Assert.Throws<TargetInvocationException>(() => world.CreateSystem<AddWorldDuringConstructorThrowsSystem>());
             // The manager will not be added to the list of managers if throws
@@ -120,7 +118,6 @@ namespace Unity.Entities.Tests
             protected override void OnUpdate() { }
         }
         [Test]
-        [StandaloneFixme]
         public void SystemThrowingInOnCreateIsRemoved()
         {
             var world = new World("WorldX");
@@ -134,6 +131,28 @@ namespace Unity.Entities.Tests
             world.Dispose();
         }
 
+#if !NET_DOTS
+        class SystemWithNonDefaultConstructor : ComponentSystem
+        {
+            public int data;
+
+            public SystemWithNonDefaultConstructor(int param)
+            {
+                data = param;
+            }
+
+            protected override void OnUpdate() { }
+        }
+        [Test]
+        public void SystemWithNonDefaultConstructorThrows()
+        {
+            var world = new World("WorldX");
+            Assert.That(() => { world.CreateSystem<SystemWithNonDefaultConstructor>(); },
+                Throws.TypeOf<MissingMethodException>().With.InnerException.TypeOf<MissingMethodException>());
+            world.Dispose();
+        }
+#endif
+
         class SystemIsAccessibleDuringOnCreateManagerSystem : ComponentSystem
         {
             protected override void OnCreate()
@@ -144,7 +163,6 @@ namespace Unity.Entities.Tests
             protected override void OnUpdate() { }
         }
         [Test]
-        [StandaloneFixme]
         public void SystemIsAccessibleDuringOnCreateManager ()
         {
             var world = new World("WorldX");
@@ -156,15 +174,14 @@ namespace Unity.Entities.Tests
         }
 
         //@TODO: Test for adding a manager from one world to another.
-        
+
         [Test]
-        [StandaloneFixme]
         public unsafe void WorldNoOverlappingChunkSequenceNumbers()
         {
             var worldA = new World("WorldA");
             var worldB = new World("WorldB");
 
-            World.Active = worldB;
+            World.DefaultGameObjectInjectionWorld = worldB;
 
             worldA.EntityManager.CreateEntity();
             worldB.EntityManager.CreateEntity();
@@ -179,7 +196,7 @@ namespace Unity.Entities.Tests
                 {
                     var chunkB = worldBChunks[i].m_Chunk;
                     var sequenceNumberDiff = chunkA->SequenceNumber - chunkB->SequenceNumber;
-                    
+
                     // Any chunk sequence numbers in different worlds should be separated by at least 32 bits
                     Assert.IsTrue(sequenceNumberDiff > 1<<32 );
                 }
@@ -187,10 +204,12 @@ namespace Unity.Entities.Tests
 
             worldAChunks.Dispose();
             worldBChunks.Dispose();
+
+            worldA.Dispose();
+            worldB.Dispose();
         }
-        
+
         [Test]
-        [StandaloneFixme]
         public unsafe void WorldChunkSequenceNumbersNotReused()
         {
             var worldA = new World("WorldA");
@@ -200,23 +219,95 @@ namespace Unity.Entities.Tests
                 var entity = worldA.EntityManager.CreateEntity();
                 var chunk = worldA.EntityManager.GetChunk(entity);
                 lastChunkSequenceNumber = chunk.m_Chunk->SequenceNumber;
-                                
+
                 worldA.EntityManager.DestroyEntity(entity);
             }
-            
+
             for (int i = 0; i < 1000; i++)
             {
                 var entity = worldA.EntityManager.CreateEntity();
                 var chunk = worldA.EntityManager.GetChunk(entity);
                 var chunkSequenceNumber = chunk.m_Chunk->SequenceNumber;
-                
+
                 // Sequence numbers should be increasing and should not be reused when chunk is re-used (after zero count)
                 Assert.IsTrue(chunkSequenceNumber > lastChunkSequenceNumber );
                 lastChunkSequenceNumber = chunkSequenceNumber;
-                
+
                 worldA.EntityManager.DestroyEntity(entity);
             }
 
+            worldA.Dispose();
+        }
+
+        [UpdateInGroup(typeof(SimulationSystemGroup))]
+        public class UpdateCountSystem : ComponentSystem
+        {
+            public double lastUpdateTime;
+            public float lastUpdateDeltaTime;
+            public int updateCount;
+
+            protected override void OnUpdate()
+            {
+                lastUpdateTime = Time.ElapsedTime;
+                lastUpdateDeltaTime = Time.DeltaTime;
+                updateCount++;
+            }
+        }
+
+        [Test]
+        public void WorldSimulationFixedStep()
+        {
+            var world = new World("World A");
+            var sim = world.GetOrCreateSystem<SimulationSystemGroup>();
+            var uc = world.GetOrCreateSystem<UpdateCountSystem>();
+            sim.AddSystemToUpdateList(uc);
+
+            // Unity.Core.Hybrid.UpdateWorldTimeSystem
+            var timeData = new TimeData();
+
+            void AdvanceWorldTime(float amount)
+            {
+                uc.updateCount = 0;
+                timeData = new TimeData(timeData.ElapsedTime + amount, amount);
+                world.SetTime(timeData);
+            }
+
+            sim.SetFixedTimeStep(1.0f);
+            Assert.IsTrue(sim.FixedTimeStepEnabled);
+
+            // first frame will tick immediately
+            AdvanceWorldTime(0.5f);
+            world.Update();
+            Assert.AreEqual(0.5, uc.lastUpdateTime, 0.001f);
+            Assert.AreEqual(1.0, uc.lastUpdateDeltaTime, 0.001f);
+            Assert.AreEqual(1, uc.updateCount);
+
+            AdvanceWorldTime(1.1f);
+            world.Update();
+            Assert.AreEqual(1.5, uc.lastUpdateTime, 0.001f);
+            Assert.AreEqual(1.0, uc.lastUpdateDeltaTime, 0.001f);
+            Assert.AreEqual(1, uc.updateCount);
+
+            // No update should happen because the time elapsed is less than the interval
+            AdvanceWorldTime(0.1f);
+            world.Update();
+            Assert.AreEqual(1.5, uc.lastUpdateTime, 0.001f);
+            Assert.AreEqual(1.0, uc.lastUpdateDeltaTime, 0.001f);
+            Assert.AreEqual(0, uc.updateCount);
+
+            AdvanceWorldTime(1.0f);
+            world.Update();
+            Assert.AreEqual(2.5, uc.lastUpdateTime, 0.001f);
+            Assert.AreEqual(1.0, uc.lastUpdateDeltaTime, 0.001f);
+            Assert.AreEqual(1, uc.updateCount);
+
+            // If time jumps by a lot, we should tick the fixed rate systems
+            // multiple times
+            AdvanceWorldTime(2.0f);
+            world.Update();
+            Assert.AreEqual(4.5, uc.lastUpdateTime, 0.001f);
+            Assert.AreEqual(1.0, uc.lastUpdateDeltaTime, 0.001f);
+            Assert.AreEqual(2, uc.updateCount);
         }
     }
 }

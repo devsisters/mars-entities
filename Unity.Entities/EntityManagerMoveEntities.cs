@@ -16,6 +16,56 @@ namespace Unity.Entities
         // PUBLIC
         // ----------------------------------------------------------------------------------------------------------
 
+
+        /// <summary>
+        /// Moves all entities managed by the specified EntityManager to the world of this EntityManager.
+        /// </summary>
+        /// <remarks>
+        /// The entities moved are owned by this EntityManager.
+        ///
+        /// Each <see cref="World"/> has one EntityManager, which manages all the entities in that world. This function
+        /// allows you to transfer entities from one World to another.
+        ///
+        /// **Important:** This function creates a sync point, which means that the EntityManager waits for all
+        /// currently running Jobs to complete before moving the entities and no additional Jobs can start before
+        /// the function is finished. A sync point can cause a drop in performance because the ECS framework may not
+        /// be able to make use of the processing power of all available cores.
+        /// </remarks>
+        /// <param name="srcEntities">The EntityManager whose entities are appropriated.</param>
+        public void MoveEntitiesFrom(EntityManager srcEntities)
+        {
+            using (var entityRemapping = srcEntities.CreateEntityRemapArray(Allocator.TempJob))
+                MoveEntitiesFromInternalAll(srcEntities, entityRemapping);
+        }
+
+        
+        /// <summary>
+        /// Moves all entities managed by the specified EntityManager to the <see cref="World"/> of this EntityManager and fills
+        /// an array with their Entity objects.
+        /// </summary>
+        /// <remarks>
+        /// After the move, the entities are managed by this EntityManager. Use the `output` array to make post-move
+        /// changes to the transferred entities.
+        ///
+        /// Each world has one EntityManager, which manages all the entities in that world. This function
+        /// allows you to transfer entities from one World to another.
+        ///
+        /// **Important:** This function creates a sync point, which means that the EntityManager waits for all
+        /// currently running Jobs to complete before moving the entities and no additional Jobs can start before
+        /// the function is finished. A sync point can cause a drop in performance because the ECS framework may not
+        /// be able to make use of the processing power of all available cores.
+        /// </remarks>
+        /// <param name="output">An array to receive the Entity objects of the transferred entities.</param>
+        /// <param name="srcEntities">The EntityManager whose entities are appropriated.</param>
+        public void MoveEntitiesFrom(out NativeArray<Entity> output, EntityManager srcEntities)
+        {
+            using (var entityRemapping = srcEntities.CreateEntityRemapArray(Allocator.TempJob))
+            {
+                MoveEntitiesFromInternalAll(srcEntities, entityRemapping);
+                EntityRemapUtility.GetTargets(out output, entityRemapping);
+            }
+        }
+        
         /// <summary>
         /// Moves all entities managed by the specified EntityManager to the <see cref="World"/> of this EntityManager and fills
         /// an array with their <see cref="Entity"/> objects.
@@ -36,34 +86,62 @@ namespace Unity.Entities
         /// <param name="srcEntities">The EntityManager whose entities are appropriated.</param>
         /// <param name="entityRemapping">A set of entity transformations to make during the transfer.</param>
         /// <exception cref="ArgumentException"></exception>
-        public void MoveEntitiesFrom(out NativeArray<Entity> output, EntityManager srcEntities,
-            NativeArray<EntityRemapUtility.EntityRemapInfo> entityRemapping)
+        public void MoveEntitiesFrom(out NativeArray<Entity> output, EntityManager srcEntities, NativeArray<EntityRemapUtility.EntityRemapInfo> entityRemapping)
         {
-#if ENABLE_UNITY_COLLECTIONS_CHECKS
-            if (srcEntities == this)
-                throw new ArgumentException("srcEntities must not be the same as this EntityManager.");
-
-            if (!srcEntities.m_ManagedComponentStore.AllSharedComponentReferencesAreFromChunks(srcEntities
-                .EntityComponentStore))
-                throw new ArgumentException(
-                    "EntityManager.MoveEntitiesFrom failed - All ISharedComponentData references must be from EntityManager. (For example EntityQuery.SetFilter with a shared component type is not allowed during EntityManager.MoveEntitiesFrom)");
-#endif
-
-            BeforeStructuralChange();
-            srcEntities.BeforeStructuralChange();
-            var archetypeChanges = EntityComponentStore->BeginArchetypeChangeTracking();
-
-            MoveChunksFrom(entityRemapping,
-                srcEntities.EntityComponentStore, srcEntities.ManagedComponentStore);
-
+            MoveEntitiesFromInternalAll(srcEntities, entityRemapping);
             EntityRemapUtility.GetTargets(out output, entityRemapping);
-
-            var changedArchetypes = EntityComponentStore->EndArchetypeChangeTracking(archetypeChanges);
-            EntityQueryManager.AddAdditionalArchetypes(changedArchetypes);
-
-            //@TODO: Need to increment the component versions based the moved chunks...
+        }
+        
+        /// <summary>
+        /// Moves all entities managed by the specified EntityManager to the <see cref="World"/> of this EntityManager.
+        /// </summary>
+        /// <remarks>
+        /// After the move, the entities are managed by this EntityManager.
+        ///
+        /// Each World has one EntityManager, which manages all the entities in that world. This function
+        /// allows you to transfer entities from one world to another.
+        ///
+        /// **Important:** This function creates a sync point, which means that the EntityManager waits for all
+        /// currently running Jobs to complete before moving the entities and no additional Jobs can start before
+        /// the function is finished. A sync point can cause a drop in performance because the ECS framework may not
+        /// be able to make use of the processing power of all available cores.
+        /// </remarks>
+        /// <param name="srcEntities">The EntityManager whose entities are appropriated.</param>
+        /// <param name="entityRemapping">A set of entity transformations to make during the transfer.</param>
+        /// <exception cref="ArgumentException">Thrown if you attempt to transfer entities to the EntityManager
+        /// that already owns them.</exception>
+        public void MoveEntitiesFrom(EntityManager srcEntities, NativeArray<EntityRemapUtility.EntityRemapInfo> entityRemapping)
+        {
+            MoveEntitiesFromInternalAll(srcEntities, entityRemapping);
         }
 
+        
+        /// <summary>
+        /// Moves a selection of the entities managed by the specified EntityManager to the <see cref="World"/> of this EntityManager
+        /// and fills an array with their <see cref="Entity"/> objects.
+        /// </summary>
+        /// <remarks>
+        /// After the move, the entities are managed by this EntityManager. Use the `output` array to make post-move
+        /// changes to the transferred entities.
+        ///
+        /// Each world has one EntityManager, which manages all the entities in that world. This function
+        /// allows you to transfer entities from one World to another.
+        ///
+        /// **Important:** This function creates a sync point, which means that the EntityManager waits for all
+        /// currently running Jobs to complete before moving the entities and no additional Jobs can start before
+        /// the function is finished. A sync point can cause a drop in performance because the ECS framework may not
+        /// be able to make use of the processing power of all available cores.
+        /// </remarks>
+        /// <param name="srcEntities">The EntityManager whose entities are appropriated.</param>
+        /// <param name="filter">A EntityQuery that defines the entities to move. Must be part of the source
+        /// World.</param>
+        /// <exception cref="ArgumentException"></exception>
+        public void MoveEntitiesFrom(EntityManager srcEntities, EntityQuery filter)
+        {
+            using(var entityRemapping = srcEntities.CreateEntityRemapArray(Allocator.TempJob))
+                MoveEntitiesFromInternalQuery(srcEntities, filter, entityRemapping);
+        }
+        
         /// <summary>
         /// Moves a selection of the entities managed by the specified EntityManager to the <see cref="World"/> of this EntityManager
         /// and fills an array with their <see cref="Entity"/> objects.
@@ -86,49 +164,10 @@ namespace Unity.Entities
         /// World.</param>
         /// <param name="entityRemapping">A set of entity transformations to make during the transfer.</param>
         /// <exception cref="ArgumentException"></exception>
-        public void MoveEntitiesFrom(out NativeArray<Entity> output, EntityManager srcEntities, EntityQuery filter,
-            NativeArray<EntityRemapUtility.EntityRemapInfo> entityRemapping)
+        public void MoveEntitiesFrom(out NativeArray<Entity> output, EntityManager srcEntities, EntityQuery filter, NativeArray<EntityRemapUtility.EntityRemapInfo> entityRemapping)
         {
-#if ENABLE_UNITY_COLLECTIONS_CHECKS
-            if (filter.EntityComponentStore != srcEntities.EntityComponentStore)
-                throw new ArgumentException(
-                    "EntityManager.MoveEntitiesFrom failed - srcEntities and filter must belong to the same World)");
-#endif
-            using (var chunks = filter.CreateArchetypeChunkArray(Allocator.TempJob))
-            {
-                MoveEntitiesFrom(out output, srcEntities, chunks, entityRemapping);
-            }
-        }
-
-        /// <summary>
-        /// Moves all entities managed by the specified EntityManager to the <see cref="World"/> of this EntityManager and fills
-        /// an array with their Entity objects.
-        /// </summary>
-        /// <remarks>
-        /// After the move, the entities are managed by this EntityManager. Use the `output` array to make post-move
-        /// changes to the transferred entities.
-        ///
-        /// Each world has one EntityManager, which manages all the entities in that world. This function
-        /// allows you to transfer entities from one World to another.
-        ///
-        /// **Important:** This function creates a sync point, which means that the EntityManager waits for all
-        /// currently running Jobs to complete before moving the entities and no additional Jobs can start before
-        /// the function is finished. A sync point can cause a drop in performance because the ECS framework may not
-        /// be able to make use of the processing power of all available cores.
-        /// </remarks>
-        /// <param name="output">An array to receive the Entity objects of the transferred entities.</param>
-        /// <param name="srcEntities">The EntityManager whose entities are appropriated.</param>
-        public void MoveEntitiesFrom(out NativeArray<Entity> output, EntityManager srcEntities)
-        {
-            var entityRemapping = srcEntities.CreateEntityRemapArray(Allocator.TempJob);
-            try
-            {
-                MoveEntitiesFrom(out output, srcEntities, entityRemapping);
-            }
-            finally
-            {
-                entityRemapping.Dispose();
-            }
+            MoveEntitiesFromInternalQuery(srcEntities, filter, entityRemapping);
+            EntityRemapUtility.GetTargets(out output, entityRemapping);
         }
 
         /// <summary>
@@ -151,20 +190,41 @@ namespace Unity.Entities
         /// <param name="entityRemapping">A set of entity transformations to make during the transfer.</param>
         /// <exception cref="ArgumentException">Thrown if the EntityQuery object used as the `filter` comes
         /// from a different world than the `srcEntities` EntityManager.</exception>
-        public void MoveEntitiesFrom(EntityManager srcEntities, EntityQuery filter,
-            NativeArray<EntityRemapUtility.EntityRemapInfo> entityRemapping)
+        public void MoveEntitiesFrom(EntityManager srcEntities, EntityQuery filter, NativeArray<EntityRemapUtility.EntityRemapInfo> entityRemapping)
         {
-#if ENABLE_UNITY_COLLECTIONS_CHECKS
-            if (filter.EntityComponentStore != srcEntities.EntityComponentStore)
-                throw new ArgumentException(
-                    "EntityManager.MoveEntitiesFrom failed - srcEntities and filter must belong to the same World)");
-#endif
-            using (var chunks = filter.CreateArchetypeChunkArray(Allocator.TempJob))
-            {
-                MoveEntitiesFrom(srcEntities, chunks, entityRemapping);
-            }
+            MoveEntitiesFromInternalQuery(srcEntities, filter, entityRemapping);
         }
 
+        /// <summary>
+        /// Moves a selection of the entities managed by the specified EntityManager to the <see cref="World"/> of this EntityManager
+        /// and fills an array with their <see cref="Entity"/> objects.
+        /// </summary>
+        /// <remarks>
+        /// After the move, the entities are managed by this EntityManager. Use the `output` array to make post-move
+        /// changes to the transferred entities.
+        ///
+        /// Each world has one EntityManager, which manages all the entities in that world. This function
+        /// allows you to transfer entities from one World to another.
+        ///
+        /// **Important:** This function creates a sync point, which means that the EntityManager waits for all
+        /// currently running Jobs to complete before moving the entities and no additional Jobs can start before
+        /// the function is finished. A sync point can cause a drop in performance because the ECS framework may not
+        /// be able to make use of the processing power of all available cores.
+        /// </remarks>
+        /// <param name="output">An array to receive the Entity objects of the transferred entities.</param>
+        /// <param name="srcEntities">The EntityManager whose entities are appropriated.</param>
+        /// <param name="filter">A EntityQuery that defines the entities to move. Must be part of the source
+        /// World.</param>
+        /// <exception cref="ArgumentException"></exception>
+        public void MoveEntitiesFrom(out NativeArray<Entity> output, EntityManager srcEntities, EntityQuery filter)
+        {
+            using (var entityRemapping = srcEntities.CreateEntityRemapArray(Allocator.TempJob))
+            {
+                MoveEntitiesFromInternalQuery(srcEntities, filter, entityRemapping);
+                EntityRemapUtility.GetTargets(out output, entityRemapping);
+            }
+        }
+        
         /// <summary>
         /// Creates a remapping array with one element for each entity in the <see cref="World"/>.
         /// </summary>
@@ -172,40 +232,52 @@ namespace Unity.Entities
         /// <returns>An array containing a no-op identity transformation for each entity.</returns>
         public NativeArray<EntityRemapUtility.EntityRemapInfo> CreateEntityRemapArray(Allocator allocator)
         {
-            return new NativeArray<EntityRemapUtility.EntityRemapInfo>(m_EntityComponentStore->EntitiesCapacity,
-                allocator);
+            return new NativeArray<EntityRemapUtility.EntityRemapInfo>(m_EntityComponentStore->EntitiesCapacity, allocator);
         }
 
-        // @TODO Proper description of remap utility.
-        /// <summary>
-        /// Moves all entities managed by the specified EntityManager to the <see cref="World"/> of this EntityManager.
-        /// </summary>
-        /// <remarks>
-        /// After the move, the entities are managed by this EntityManager.
-        ///
-        /// Each World has one EntityManager, which manages all the entities in that world. This function
-        /// allows you to transfer entities from one world to another.
-        ///
-        /// **Important:** This function creates a sync point, which means that the EntityManager waits for all
-        /// currently running Jobs to complete before moving the entities and no additional Jobs can start before
-        /// the function is finished. A sync point can cause a drop in performance because the ECS framework may not
-        /// be able to make use of the processing power of all available cores.
-        /// </remarks>
-        /// <param name="srcEntities">The EntityManager whose entities are appropriated.</param>
-        /// <param name="entityRemapping">A set of entity transformations to make during the transfer.</param>
-        /// <exception cref="ArgumentException">Thrown if you attempt to transfer entities to the EntityManager
-        /// that already owns them.</exception>
-        public void MoveEntitiesFrom(EntityManager srcEntities,
-            NativeArray<EntityRemapUtility.EntityRemapInfo> entityRemapping)
+        // ----------------------------------------------------------------------------------------------------------
+        // INTERNAL
+        // ----------------------------------------------------------------------------------------------------------
+
+        void MoveEntitiesFromInternalQuery(EntityManager srcEntities, EntityQuery filter, NativeArray<EntityRemapUtility.EntityRemapInfo> entityRemapping)
+        {
+#if ENABLE_UNITY_COLLECTIONS_CHECKS
+            if (filter._EntityComponentStore != srcEntities.EntityComponentStore)
+                throw new ArgumentException(
+                    "EntityManager.MoveEntitiesFrom failed - srcEntities and filter must belong to the same World)");
+
+            if (srcEntities == this)
+                throw new ArgumentException("srcEntities must not be the same as this EntityManager.");
+#endif
+            BeforeStructuralChange();
+            srcEntities.BeforeStructuralChange();
+
+            using (var chunks = filter.CreateArchetypeChunkArray(Allocator.TempJob))
+            {
+#if ENABLE_UNITY_COLLECTIONS_CHECKS
+                for (int i = 0; i < chunks.Length; ++i)
+                    if (chunks[i].m_Chunk->Archetype->HasChunkHeader)
+                        throw new ArgumentException("MoveEntitiesFrom can not move chunks that contain ChunkHeader components.");
+#endif
+                
+                var archetypeChanges = EntityComponentStore->BeginArchetypeChangeTracking();
+
+                MoveChunksFromFiltered(chunks, entityRemapping, srcEntities.EntityComponentStore, srcEntities.ManagedComponentStore);
+
+                var changedArchetypes = EntityComponentStore->EndArchetypeChangeTracking(archetypeChanges);
+                EntityQueryManager.AddAdditionalArchetypes(changedArchetypes);
+            }
+        }
+       
+        public void MoveEntitiesFromInternalAll(EntityManager srcEntities, NativeArray<EntityRemapUtility.EntityRemapInfo> entityRemapping)
         {
 #if ENABLE_UNITY_COLLECTIONS_CHECKS
             if (srcEntities == this)
                 throw new ArgumentException("srcEntities must not be the same as this EntityManager.");
 
             if (entityRemapping.Length < srcEntities.m_EntityComponentStore->EntitiesCapacity)
-                throw new ArgumentException(
-                    "entityRemapping.Length isn't large enough, use srcEntities.CreateEntityRemapArray");
-
+                throw new ArgumentException("entityRemapping.Length isn't large enough, use srcEntities.CreateEntityRemapArray");
+            
             if (!srcEntities.m_ManagedComponentStore.AllSharedComponentReferencesAreFromChunks(srcEntities
                 .EntityComponentStore))
                 throw new ArgumentException(
@@ -216,102 +288,15 @@ namespace Unity.Entities
             srcEntities.BeforeStructuralChange();
             var archetypeChanges = EntityComponentStore->BeginArchetypeChangeTracking();
 
-            MoveChunksFrom(entityRemapping,
-                srcEntities.EntityComponentStore, srcEntities.ManagedComponentStore);
-
-            var changedArchetypes = EntityComponentStore->EndArchetypeChangeTracking(archetypeChanges);
-            EntityQueryManager.AddAdditionalArchetypes(changedArchetypes);
-
-            //@TODO: Need to increment the component versions based the moved chunks...
-        }
-
-        /// <summary>
-        /// Moves all entities managed by the specified EntityManager to the world of this EntityManager.
-        /// </summary>
-        /// <remarks>
-        /// The entities moved are owned by this EntityManager.
-        ///
-        /// Each <see cref="World"/> has one EntityManager, which manages all the entities in that world. This function
-        /// allows you to transfer entities from one World to another.
-        ///
-        /// **Important:** This function creates a sync point, which means that the EntityManager waits for all
-        /// currently running Jobs to complete before moving the entities and no additional Jobs can start before
-        /// the function is finished. A sync point can cause a drop in performance because the ECS framework may not
-        /// be able to make use of the processing power of all available cores.
-        /// </remarks>
-        /// <param name="srcEntities">The EntityManager whose entities are appropriated.</param>
-        public void MoveEntitiesFrom(EntityManager srcEntities)
-        {
-            var entityRemapping = srcEntities.CreateEntityRemapArray(Allocator.TempJob);
-            try
-            {
-                MoveEntitiesFrom(srcEntities, entityRemapping);
-            }
-            finally
-            {
-                entityRemapping.Dispose();
-            }
-        }
-
-        // ----------------------------------------------------------------------------------------------------------
-        // INTERNAL
-        // ----------------------------------------------------------------------------------------------------------
-
-        void MoveEntitiesFrom(out NativeArray<Entity> output, EntityManager srcEntities,
-            NativeArray<ArchetypeChunk> chunks, NativeArray<EntityRemapUtility.EntityRemapInfo> entityRemapping)
-        {
-#if ENABLE_UNITY_COLLECTIONS_CHECKS
-            if (srcEntities == this)
-                throw new ArgumentException("srcEntities must not be the same as this EntityManager.");
-            for (int i = 0; i < chunks.Length; ++i)
-                if (chunks[i].m_Chunk->Archetype->HasChunkHeader)
-                    throw new ArgumentException(
-                        "MoveEntitiesFrom can not move chunks that contain ChunkHeader components.");
-#endif
-
-            BeforeStructuralChange();
-            srcEntities.BeforeStructuralChange();
-            var archetypeChanges = EntityComponentStore->BeginArchetypeChangeTracking();
-
-            MoveChunksFrom(chunks, entityRemapping,
-                srcEntities.EntityComponentStore, srcEntities.ManagedComponentStore);
-
-            var changedArchetypes = EntityComponentStore->EndArchetypeChangeTracking(archetypeChanges);
-            EntityQueryManager.AddAdditionalArchetypes(changedArchetypes);
-
-            EntityRemapUtility.GetTargets(out output, entityRemapping);
-        }
-
-        void MoveEntitiesFrom(EntityManager srcEntities, NativeArray<ArchetypeChunk> chunks,
-            NativeArray<EntityRemapUtility.EntityRemapInfo> entityRemapping)
-        {
-#if ENABLE_UNITY_COLLECTIONS_CHECKS
-            if (srcEntities == this)
-                throw new ArgumentException("srcEntities must not be the same as this EntityManager.");
-
-            if (entityRemapping.Length < srcEntities.m_EntityComponentStore->EntitiesCapacity)
-                throw new ArgumentException(
-                    "entityRemapping.Length isn't large enough, use srcEntities.CreateEntityRemapArray");
-
-            for (int i = 0; i < chunks.Length; ++i)
-                if (chunks[i].m_Chunk->Archetype->HasChunkHeader)
-                    throw new ArgumentException(
-                        "MoveEntitiesFrom can not move chunks that contain ChunkHeader components.");
-#endif
-
-            BeforeStructuralChange();
-            srcEntities.BeforeStructuralChange();
-            var archetypeChanges = EntityComponentStore->BeginArchetypeChangeTracking();
-
-            MoveChunksFrom(chunks, entityRemapping, srcEntities.EntityComponentStore,
-                srcEntities.ManagedComponentStore);
-
+            MoveChunksFromAll(entityRemapping, srcEntities.EntityComponentStore, srcEntities.ManagedComponentStore);
+            
             var changedArchetypes = EntityComponentStore->EndArchetypeChangeTracking(archetypeChanges);
             EntityQueryManager.AddAdditionalArchetypes(changedArchetypes);
         }
+        
+        
 
-
-        internal void MoveChunksFrom(
+        internal void MoveChunksFromFiltered(
             NativeArray<ArchetypeChunk> chunks,
             NativeArray<EntityRemapUtility.EntityRemapInfo> entityRemapping,
             EntityComponentStore* srcEntityComponentStore,
@@ -330,13 +315,19 @@ namespace Unity.Entities
             int chunkCount = chunks.Length;
             var remapChunks = new NativeArray<RemapChunk>(chunkCount, Allocator.TempJob);
 
+            Archetype* previousSrcArchetypee = null;
+            Archetype* dstArchetype = null;
+            
             for (int i = 0; i < chunkCount; ++i)
             {
                 var chunk = chunks[i].m_Chunk;
                 var archetype = chunk->Archetype;
 
-                //TODO: this should not be done more than once for each archetype
-                var dstArchetype = EntityComponentStore->GetOrCreateArchetype(archetype->Types, archetype->TypesCount);
+                if (previousSrcArchetypee != archetype)
+                {
+                    dstArchetype = EntityComponentStore->GetOrCreateArchetype(archetype->Types, archetype->TypesCount);
+                    EntityComponentStore->IncrementComponentTypeOrderVersion(dstArchetype);
+                }
 
                 remapChunks[i] = new RemapChunk {chunk = chunk, dstArchetype = dstArchetype};
 
@@ -352,10 +343,10 @@ namespace Unity.Entities
 
                     EntityComponentStore->CreateEntities(dstArchetype->MetaChunkArchetype, &dstEntity, 1);
 
-                    srcEntityComponentStore->GetChunk(srcEntity, out var srcChunk, out var srcIndex);
-                    EntityComponentStore->GetChunk(dstEntity, out var dstChunk, out var dstIndex);
+                    var srcEntityInChunk = srcEntityComponentStore->GetEntityInChunk(srcEntity);
+                    var dstEntityInChunk = EntityComponentStore->GetEntityInChunk(dstEntity);
 
-                    ChunkDataUtility.SwapComponents(srcChunk, srcIndex, dstChunk, dstIndex, 1,
+                    ChunkDataUtility.SwapComponents(srcEntityInChunk.Chunk, srcEntityInChunk.IndexInChunk, dstEntityInChunk.Chunk, dstEntityInChunk.IndexInChunk, 1,
                         srcEntityComponentStore->GlobalSystemVersion, EntityComponentStore->GlobalSystemVersion);
                     EntityRemapUtility.AddEntityRemapping(ref entityRemapping, srcEntity, dstEntity);
 
@@ -388,19 +379,24 @@ namespace Unity.Entities
 
             k_ProfileMoveSharedComponents.Begin();
             var remapShared =
-                ManagedComponentStore.MoveSharedComponents(srcManagedComponentStore, chunks,
-                    entityRemapping,
-                    Allocator.TempJob);
+                ManagedComponentStore.MoveSharedComponents(srcManagedComponentStore, chunks, Allocator.TempJob);
             k_ProfileMoveSharedComponents.End();
 
-            var remapChunksJob = new RemapChunksJob
+            new ChunkPatchEntities
+            {
+                RemapChunks = remapChunks,
+                EntityRemapping = entityRemapping,
+                EntityComponentStore = EntityComponentStore
+            }.Run();
+
+            var remapChunksJob = new RemapChunksFilteredJob
             {
                 dstEntityComponentStore = EntityComponentStore,
                 remapChunks = remapChunks,
                 entityRemapping = entityRemapping
             }.Schedule(remapChunks.Length, 1);
 
-            var moveChunksBetweenArchetypeJob = new MoveChunksBetweenArchetypeJob
+            var moveChunksBetweenArchetypeJob = new MoveFilteredChunksBetweenArchetypexJob
             {
                 remapChunks = remapChunks,
                 remapShared = remapShared,
@@ -408,12 +404,14 @@ namespace Unity.Entities
             }.Schedule(remapChunksJob);
 
             moveChunksBetweenArchetypeJob.Complete();
-
+            
+            ManagedComponentStore.Playback(ref EntityComponentStore->ManagedChangesTracker);
+            
             remapShared.Dispose();
             remapChunks.Dispose();
         }
 
-        internal void MoveChunksFrom(
+        internal void MoveChunksFromAll(
             NativeArray<EntityRemapUtility.EntityRemapInfo> entityRemapping,
             EntityComponentStore* srcEntityComponentStore,
             ManagedComponentStore srcManagedComponentStore)
@@ -428,7 +426,7 @@ namespace Unity.Entities
             JobHandle.ScheduleBatchedJobs();
 
             int chunkCount = 0;
-            for (var i = srcEntityComponentStore->m_Archetypes.Length - 1; i >= 0; --i)
+            for (var i = 0; i < srcEntityComponentStore->m_Archetypes.Length; ++i)
             {
                 var srcArchetype = srcEntityComponentStore->m_Archetypes.Ptr[i];
                 chunkCount += srcArchetype->Chunks.Count;
@@ -440,7 +438,7 @@ namespace Unity.Entities
 
             int chunkIndex = 0;
             int archetypeIndex = 0;
-            for (var i = srcEntityComponentStore->m_Archetypes.Length - 1; i >= 0; --i)
+            for (var i = 0; i < srcEntityComponentStore->m_Archetypes.Length; ++i)
             {
                 var srcArchetype = srcEntityComponentStore->m_Archetypes.Ptr[i];
                 if (srcArchetype->Chunks.Count != 0)
@@ -449,7 +447,7 @@ namespace Unity.Entities
                         srcArchetype->TypesCount);
 
                     remapArchetypes[archetypeIndex] = new RemapArchetype
-                        {srcArchetype = srcArchetype, dstArchetype = dstArchetype};
+                    {srcArchetype = srcArchetype, dstArchetype = dstArchetype};
 
                     for (var j = 0; j < srcArchetype->Chunks.Count; ++j)
                     {
@@ -503,6 +501,13 @@ namespace Unity.Entities
                 ManagedComponentStore.MoveAllSharedComponents(srcManagedComponentStore, Allocator.TempJob);
             k_ProfileMoveSharedComponents.End();
 
+            new ChunkPatchEntities
+            {
+                RemapChunks = remapChunks,
+                EntityRemapping = entityRemapping,
+                EntityComponentStore = EntityComponentStore
+            }.Run();
+            
             var remapAllChunksJob = new RemapAllChunksJob
             {
                 dstEntityComponentStore = EntityComponentStore,
@@ -510,7 +515,7 @@ namespace Unity.Entities
                 entityRemapping = entityRemapping
             }.Schedule(remapChunks.Length, 1);
 
-            var remapArchetypesJob = new RemapArchetypesJob
+            var remapArchetypesJob = new RemapAllArchetypesJob
             {
                 remapArchetypes = remapArchetypes,
                 remapShared = remapShared,
@@ -518,77 +523,11 @@ namespace Unity.Entities
                 chunkHeaderType = TypeManager.GetTypeIndex<ChunkHeader>()
             }.Schedule(archetypeIndex, 1, remapAllChunksJob);
 
+            ManagedComponentStore.Playback(ref EntityComponentStore->ManagedChangesTracker);
+            
             remapArchetypesJob.Complete();
             remapShared.Dispose();
             remapChunks.Dispose();
-        }
-
-        internal void MoveChunksFrom(
-            EntityComponentStore* srcEntityComponentStore,
-            ManagedComponentStore srcManagedComponentStore)
-        {
-            var entityRemapping =
-                new NativeArray<EntityRemapUtility.EntityRemapInfo>(srcEntityComponentStore->EntitiesCapacity,
-                    Allocator.TempJob);
-
-            MoveChunksFrom(entityRemapping,
-                srcEntityComponentStore, srcManagedComponentStore);
-
-            entityRemapping.Dispose();
-        }
-
-        internal Chunk* CloneChunkForDiffingFrom(Chunk* chunk,
-            ManagedComponentStore srcManagedManager)
-        {
-            int* sharedIndices = stackalloc int[chunk->Archetype->NumSharedComponents];
-            chunk->SharedComponentValues.CopyTo(sharedIndices, 0, chunk->Archetype->NumSharedComponents);
-
-            ManagedComponentStore.CopySharedComponents(srcManagedManager, sharedIndices,
-                chunk->Archetype->NumSharedComponents);
-
-            // Allocate a new chunk
-            Archetype* arch = EntityComponentStore->GetOrCreateArchetype(chunk->Archetype->Types,
-                chunk->Archetype->TypesCount);
-
-            Chunk* targetChunk = EntityComponentStore->GetCleanChunk(arch, sharedIndices);
-
-            ManagedComponentStore.Playback(ref EntityComponentStore->ManagedChangesTracker);
-
-            // GetCleanChunk & CopySharedComponents both acquire a ref, once chunk owns, release CopySharedComponents ref
-            for (int i = 0; i < chunk->Archetype->NumSharedComponents; ++i)
-                ManagedComponentStore.RemoveReference(sharedIndices[i]);
-
-            UnityEngine.Assertions.Assert.AreEqual(0, targetChunk->Count);
-            UnityEngine.Assertions.Assert.IsTrue(targetChunk->Capacity >= chunk->Count);
-
-            int copySize = Chunk.GetChunkBufferSize();
-            UnsafeUtility.MemCpy(targetChunk->Buffer, chunk->Buffer, copySize);
-
-            EntityComponentStore->SetChunkCountKeepMetaChunk(targetChunk, chunk->Count);
-            ManagedComponentStore.Playback(ref EntityComponentStore->ManagedChangesTracker);
-
-            targetChunk->Archetype->EntityCount += chunk->Count;
-
-            BufferHeader.PatchAfterCloningChunk(targetChunk);
-
-            var tempEntities = new NativeArray<Entity>(targetChunk->Count, Allocator.Temp);
-
-            EntityComponentStore->AllocateEntities(targetChunk->Archetype, targetChunk, 0, targetChunk->Count,
-                (Entity*) tempEntities.GetUnsafePtr());
-
-            tempEntities.Dispose();
-
-            return targetChunk;
-        }
-
-        internal void DestroyChunkForDiffing(Chunk* chunk)
-        {
-            chunk->Archetype->EntityCount -= chunk->Count;
-            EntityComponentStore->FreeEntities(chunk);
-
-            EntityComponentStore->SetChunkCountKeepMetaChunk(chunk, 0);
-
-            ManagedComponentStore.Playback(ref EntityComponentStore->ManagedChangesTracker);
         }
 
         struct RemapChunk
@@ -601,6 +540,26 @@ namespace Unity.Entities
         {
             public Archetype* srcArchetype;
             public Archetype* dstArchetype;
+        }
+
+        [BurstCompile]
+        struct ChunkPatchEntities : IJob
+        {
+            public NativeArray<RemapChunk> RemapChunks;
+            public NativeArray<EntityRemapUtility.EntityRemapInfo> EntityRemapping;
+            [NativeDisableUnsafePtrRestriction]
+            public EntityComponentStore* EntityComponentStore;
+
+            public void Execute()
+            {
+                for (int i = 0; i < RemapChunks.Length; i++)
+                {
+                    var remapChunk = RemapChunks[i];
+                    Chunk* chunk = remapChunk.chunk;
+                    Archetype* dstArchetype = remapChunk.dstArchetype;
+                    EntityComponentStore->ManagedChangesTracker.PatchEntities(dstArchetype, chunk, chunk->Count, EntityRemapping);
+                }
+            }
         }
 
         [BurstCompile]
@@ -632,14 +591,14 @@ namespace Unity.Entities
 
             public void Execute(int index)
             {
-                var chunk = (Chunk*) chunks[index];
+                var chunk = (Chunk*)chunks[index];
                 srcIndices[index] = chunk->ManagedArrayIndex;
                 chunk->ManagedArrayIndex = dstIndices[index];
             }
         }
 
         [BurstCompile]
-        struct RemapChunksJob : IJobParallelFor
+        struct RemapChunksFilteredJob : IJobParallelFor
         {
             [ReadOnly] public NativeArray<EntityRemapUtility.EntityRemapInfo> entityRemapping;
             [ReadOnly] public NativeArray<RemapChunk> remapChunks;
@@ -659,7 +618,7 @@ namespace Unity.Entities
         }
 
         [BurstCompile]
-        struct MoveChunksBetweenArchetypeJob : IJob
+        struct MoveFilteredChunksBetweenArchetypexJob : IJob
         {
             [ReadOnly] public NativeArray<RemapChunk> remapChunks;
             [ReadOnly] public NativeArray<int> remapShared;
@@ -681,6 +640,7 @@ namespace Unity.Entities
                     if (numSharedComponents != 0)
                     {
                         var alloc = stackalloc int[numSharedComponents];
+
                         for (int i = 0; i < numSharedComponents; ++i)
                             alloc[i] = remapShared[sharedComponentValues[i]];
                         sharedComponentValues = alloc;
@@ -718,6 +678,7 @@ namespace Unity.Entities
                 EntityRemapUtility.PatchEntities(dstArchetype->ScalarEntityPatches + 1,
                     dstArchetype->ScalarEntityPatchCount - 1, dstArchetype->BufferEntityPatches,
                     dstArchetype->BufferEntityPatchCount, chunk->Buffer, chunk->Count, ref entityRemapping);
+
                 chunk->Archetype = dstArchetype;
                 chunk->ListIndex += dstArchetype->Chunks.Count;
                 chunk->ListWithEmptySlotsIndex += dstArchetype->ChunksWithEmptySlots.Length;
@@ -725,9 +686,9 @@ namespace Unity.Entities
         }
 
         [BurstCompile]
-        struct RemapArchetypesJob : IJobParallelFor
+        struct RemapAllArchetypesJob : IJobParallelFor
         {
-            [DeallocateOnJobCompletion] [ReadOnly] public NativeArray<RemapArchetype> remapArchetypes;
+            [DeallocateOnJobCompletion][ReadOnly] public NativeArray<RemapArchetype> remapArchetypes;
 
             [NativeDisableUnsafePtrRestriction] public EntityComponentStore* dstEntityComponentStore;
 
@@ -815,8 +776,8 @@ namespace Unity.Entities
                         // modifying them here would be a race condition
                         var chunk = dstArchetype->Chunks.p[i + dstChunkCount];
                         var metaChunkEntity = chunk->metaChunkEntity;
-                        dstEntityComponentStore->GetChunk(metaChunkEntity, out var metaChunk, out var indexInMetaChunk);
-                        var chunkHeader = (ChunkHeader*) (metaChunk->Buffer + (offset + sizeOf * indexInMetaChunk));
+                        var metaEntityInChunk = dstEntityComponentStore->GetEntityInChunk(metaChunkEntity);
+                        var chunkHeader = (ChunkHeader*)(metaEntityInChunk.Chunk->Buffer + (offset + sizeOf * metaEntityInChunk.IndexInChunk));
                         chunkHeader->ArchetypeChunk = new ArchetypeChunk(chunk, dstEntityComponentStore);
                     }
                 }
