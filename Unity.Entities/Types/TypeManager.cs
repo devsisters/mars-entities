@@ -671,27 +671,6 @@ namespace Unity.Entities
                 || typeof(IBufferElementData).IsAssignableFrom(type);
         }
 
-        // NOTE(jameskim): 모든 어셈블리를 순회하는데 시간이 오래 걸려서 하드코딩된 어셈블리만 순회하도록 했습니다.
-        static bool ShouldIncludeAssembly(Assembly assembly)
-        {
-            var name = assembly.GetName().Name;
-            switch (name)
-            {
-                case "Unity.Entities":
-                case "Unity.Entities.Hybrid":
-                case "Unity.Rendering.Hybrid":
-                case "Unity.Scenes.Hybrid":
-                case "Unity.Transforms":
-                case "Unity.Transforms.Hybrid":
-                case "VillageClusterModule":
-                case "VillageExploreUI":
-                case "WorldStreamerModule":
-                    return true;
-                default:
-                    return false;
-            }
-        }
-
         static void InitializeAllComponentTypes()
         {
             try
@@ -700,19 +679,25 @@ namespace Unity.Entities
 
                 double start = (new TimeSpan(DateTime.Now.Ticks)).TotalMilliseconds;
 
-                var componentTypeSet = new HashSet<Type>() { typeof(UnityEngine.Transform), typeof(UnityEngine.RectTransform) };
+                var componentTypeSet = new HashSet<Type>();
                 var assemblies = AppDomain.CurrentDomain.GetAssemblies();
-                assemblies = assemblies.Where(ShouldIncludeAssembly).ToArray();
 
                 // Inject types needed for Hybrid
-                UnityEngineObjectType = typeof(UnityEngine.Object);
                 foreach (var assembly in assemblies)
                 {
-                    var assemblyName = assembly.GetName().Name;
-                    if (assemblyName == "Unity.Entities.Hybrid")
+                    if (assembly.GetName().Name == "Unity.Entities.Hybrid")
                     {
                         GameObjectEntityType = assembly.GetType("Unity.Entities.GameObjectEntity");
                     }
+
+                    if (assembly.GetName().Name == "UnityEngine")
+                    {
+                        UnityEngineObjectType = assembly.GetType("UnityEngine.Object");
+                    }
+                }
+                if ((UnityEngineObjectType == null) || (GameObjectEntityType == null))
+                {
+                    throw new Exception("Required UnityEngine and Unity.Entities.Hybrid types not found.");
                 }
 
                 foreach (var assembly in assemblies)
@@ -813,21 +798,6 @@ namespace Unity.Entities
                         }
                     }
                 }
-
-                /*
-                // NOTE(jameskim): IComponentData, IBufferElementData, ISharedComponentData 만 추려서 리포트를 만듭니다.
-                var sb = new System.Text.StringBuilder(2048);
-                foreach (var type in componentTypeSet)
-                {
-                    sb.Append(type.Assembly.GetName().Name).Append('\t');
-                    sb.Append(type.Name).Append('\t');
-                    var shouldRegister = typeof(IComponentData).IsAssignableFrom(type)
-                                         || typeof(IBufferElementData).IsAssignableFrom(type)
-                                         || typeof(ISharedComponentData).IsAssignableFrom(type);
-                    sb.AppendLine(shouldRegister ? "TRUE" : "FALSE");
-                }
-                System.IO.File.WriteAllText("TypeManager-Report.tsv", sb.ToString());
-                */
 
                 s_StableTypeHashToTypeIndex = new NativeHashMap<ulong, int>(componentTypeSet.Count * 2, Allocator.Persistent); // Extra room added for dynamically added types
 
