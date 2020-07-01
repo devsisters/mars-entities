@@ -819,6 +819,28 @@ namespace Unity.Entities
                 || typeof(IBufferElementData).IsAssignableFrom(type);
         }
 
+        // NOTE(jameskim): 모든 어셈블리를 순회하는데 시간이 오래 걸려서 하드코딩된 어셈블리만 순회하도록 했습니다.
+        static bool ShouldIncludeAssembly(Assembly assembly)
+        {
+            var name = assembly.GetName().Name;
+            switch (name)
+            {
+                case "Unity.Entities":
+                case "Unity.Entities.Hybrid":
+                case "Unity.Rendering.Hybrid":
+                case "Unity.Scenes.Hybrid":
+                case "Unity.Transforms":
+                case "Unity.Transforms.Hybrid":
+                case "WorldCoreModule":
+                case "WorldStreamerModule":
+                case "VillageExploreUI":
+                case "VillageExploreModule":
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
         static void InitializeAllComponentTypes()
         {
             try
@@ -827,25 +849,19 @@ namespace Unity.Entities
 
                 double start = (new TimeSpan(DateTime.Now.Ticks)).TotalMilliseconds;
 
-                var componentTypeSet = new HashSet<Type>();
+                var componentTypeSet = new HashSet<Type>() { typeof(UnityEngine.Transform), typeof(UnityEngine.RectTransform) };
                 var assemblies = AppDomain.CurrentDomain.GetAssemblies();
+                assemblies = assemblies.Where(ShouldIncludeAssembly).ToArray();
 
                 // Inject types needed for Hybrid
+                UnityEngineObjectType = typeof(UnityEngine.Object);
                 foreach (var assembly in assemblies)
                 {
-                    if (assembly.GetName().Name == "Unity.Entities.Hybrid")
+                    var assemblyName = assembly.GetName().Name;
+                    if (assemblyName == "Unity.Entities.Hybrid")
                     {
                         GameObjectEntityType = assembly.GetType("Unity.Entities.GameObjectEntity");
                     }
-
-                    if (assembly.GetName().Name == "UnityEngine")
-                    {
-                        UnityEngineObjectType = assembly.GetType("UnityEngine.Object");
-                    }
-                }
-                if ((UnityEngineObjectType == null) || (GameObjectEntityType == null))
-                {
-                    throw new Exception("Required UnityEngine and Unity.Entities.Hybrid types not found.");
                 }
 
                 foreach (var assembly in assemblies)
