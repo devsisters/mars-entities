@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using NUnit.Framework;
+using Unity.Burst;
 using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
 using Unity.Jobs;
@@ -13,18 +14,20 @@ namespace Unity.Entities.Tests
     // are working.
     public class JobBasicTests : ECSTestsFixture
     {
-        private const int NMULT = 1;
-
         // TODO calling nUnit Assert on a job thread may be causing errors.
         // Until sorted out, pull a simple exception out for use by the worker threads.
         static void AssertOnThread(bool test)
         {
-            if (!test) throw new Exception("AssertOnThread Failed.");
+            if (!test)
+            {
+                Console.WriteLine("AssertOnThread failed.");
+                throw new Exception("AssertOnThread Failed.");
+            }
         }
 
         public struct SimpleJob : IJob
         {
-            public const int N = 1000 * NMULT;
+            public const int N = 1000;
 
             public int a;
             public int b;
@@ -37,7 +40,7 @@ namespace Unity.Entities.Tests
                 for (int i = 0; i < N; ++i)
                     result[i] = a + b;
 
-#if UNITY_DOTSPLAYER    // TODO: Don't have the library in the editor that grants access.
+#if UNITY_DOTSPLAYER && ENABLE_UNITY_COLLECTIONS_CHECKS    // TODO: Don't have the library in the editor that grants access.
                 AssertOnThread(result.m_Safety.IsAllowedToWrite());
                 AssertOnThread(!result.m_Safety.IsAllowedToRead());
 #endif
@@ -90,7 +93,7 @@ namespace Unity.Entities.Tests
 
         public struct SimpleAddSerial : IJob
         {
-            public const int N = 1000 * NMULT;
+            public const int N = 1000;
 
             public int a;
 
@@ -103,14 +106,14 @@ namespace Unity.Entities.Tests
 
             public void Execute()
             {
-#if UNITY_DOTSPLAYER    // Don't have the C# version in the editor.
+#if UNITY_DOTSPLAYER && ENABLE_UNITY_COLLECTIONS_CHECKS    // Don't have the C# version in the editor.
                 AssertOnThread(!input.m_Safety.IsAllowedToWrite());
                 AssertOnThread(input.m_Safety.IsAllowedToRead());
                 AssertOnThread(result.m_Safety.IsAllowedToWrite());
                 AssertOnThread(!result.m_Safety.IsAllowedToRead());
 
 #if UNITY_SINGLETHREADED_JOBS
-                AssertOnThread(JobsUtility.InJob);
+                AssertOnThread(JobsUtility.IsExecutingJob());
 #endif
 #endif
                 for (int i = 0; i < N; ++i)
@@ -121,6 +124,10 @@ namespace Unity.Entities.Tests
         [Test]
         public void Run3SimpleJobsInSerial()
         {
+#if UNITY_SINGLETHREADED_JOBS && UNITY_DOTSPLAYER
+            // Note the safety handles use Persistent, so only track TempJob
+            long heapMem = UnsafeUtility.GetHeapSize(Allocator.TempJob);
+#endif
             NativeArray<int> input = new NativeArray<int>(SimpleAddSerial.N, Allocator.TempJob);
             NativeArray<int> jobResult1 = new NativeArray<int>(SimpleAddSerial.N, Allocator.TempJob);
             NativeArray<int> jobResult2 = new NativeArray<int>(SimpleAddSerial.N, Allocator.TempJob);
@@ -136,17 +143,16 @@ namespace Unity.Entities.Tests
             SimpleAddSerial job3 = new SimpleAddSerial() {a = 3, input = jobResult2, result = jobResult3};
 
 #if UNITY_SINGLETHREADED_JOBS && UNITY_DOTSPLAYER
-            Assert.IsFalse(JobsUtility.InJob);
+            Assert.IsFalse(JobsUtility.IsExecutingJob());
 #endif
 
             JobHandle handle1 = job1.Schedule();
             JobHandle handle2 = job2.Schedule(handle1);
             JobHandle handle3 = job3.Schedule(handle2);
-
             handle3.Complete();
 
 #if UNITY_SINGLETHREADED_JOBS && UNITY_DOTSPLAYER
-            Assert.IsFalse(JobsUtility.InJob);
+            Assert.IsFalse(JobsUtility.IsExecutingJob());
 #endif
 
             for (int i = 0; i < SimpleAddSerial.N; ++i)
@@ -155,11 +161,16 @@ namespace Unity.Entities.Tests
             }
 
             jobResult3.Dispose();
+
+#if UNITY_SINGLETHREADED_JOBS && UNITY_DOTSPLAYER
+            long postWork = UnsafeUtility.GetHeapSize(Allocator.TempJob);
+            Assert.IsTrue(heapMem == postWork);    // make sure cleanup happened, including DeallocateOnJobCompletion
+#endif
         }
 
         public struct SimpleAddParallel : IJob
         {
-            public const int N = 1000 * NMULT;
+            public const int N = 1000;
 
             public int a;
 
@@ -177,7 +188,7 @@ namespace Unity.Entities.Tests
         }
 
         [Test]
-        public void Run3SimpleJobsInParallel()
+        public void Schedule3SimpleJobsInParallel()
         {
             NativeArray<int> input = new NativeArray<int>(SimpleAddParallel.N, Allocator.TempJob);
             NativeArray<int> jobResult1 = new NativeArray<int>(SimpleAddParallel.N, Allocator.TempJob);
@@ -214,12 +225,13 @@ namespace Unity.Entities.Tests
             jobResult1.Dispose();
             jobResult2.Dispose();
             jobResult3.Dispose();
+
             group.Dispose();
         }
 
         public struct SimpleListAdd : IJob
         {
-            public const int N = 10000 * NMULT;
+            public const int N = 1000;
 
             public int a;
 
@@ -228,7 +240,7 @@ namespace Unity.Entities.Tests
 
             public void Execute()
             {
-#if UNITY_DOTSPLAYER    // Don't have the C# version in the editor.
+#if UNITY_DOTSPLAYER && ENABLE_UNITY_COLLECTIONS_CHECKS   // Don't have the C# version in the editor.
                 AssertOnThread(!input.m_Safety.IsAllowedToWrite());
                 AssertOnThread(input.m_Safety.IsAllowedToRead());
                 AssertOnThread(result.m_Safety.IsAllowedToWrite());
@@ -240,7 +252,7 @@ namespace Unity.Entities.Tests
         }
 
         [Test]
-        public void Run3SimpleListJobsInParallel()
+        public void Schedule3SimpleListJobsInParallel()
         {
             NativeList<int> input = new NativeList<int>(Allocator.TempJob);
             NativeList<int> jobResult1 = new NativeList<int>(Allocator.TempJob);
@@ -281,12 +293,10 @@ namespace Unity.Entities.Tests
             group.Dispose();
         }
 
-
-
         public struct SimpleParallelFor : IJobParallelFor
         {
-            public const int N = 10000 * NMULT;
-            
+            public const int N = 1000;
+
             [DeallocateOnJobCompletion]
             [ReadOnly]
             public NativeArray<int> a;
@@ -299,7 +309,7 @@ namespace Unity.Entities.Tests
 
             public void Execute(int i)
             {
-#if UNITY_DOTSPLAYER    // Don't have the C# version in the editor.
+#if UNITY_DOTSPLAYER && ENABLE_UNITY_COLLECTIONS_CHECKS    // Don't have the C# version in the editor.
                 AssertOnThread(!a.m_Safety.IsAllowedToWrite());
                 AssertOnThread(a.m_Safety.IsAllowedToRead());
                 AssertOnThread(!b.m_Safety.IsAllowedToWrite());
@@ -312,13 +322,15 @@ namespace Unity.Entities.Tests
         }
 
         [Test]
-        public void ScheduleSimpleParallelFor()
+        // The parameter variants are intended to check "a little more and less" than typical thread counts, to
+        // confirm work ranges are assigned - at least correctly enough - so that each index is called once.
+        public void ScheduleSimpleParallelFor([Values(1, 3, 4, 5, 7, 8, 9, 11, 12, 13, 15, 16, 17, 1000)] int arrayLen)
         {
-            NativeArray<int> a = new NativeArray<int>(SimpleParallelFor.N, Allocator.TempJob);
-            NativeArray<int> b = new NativeArray<int>(SimpleParallelFor.N, Allocator.TempJob);
-            NativeArray<int> result = new NativeArray<int>(SimpleParallelFor.N, Allocator.TempJob);
+            NativeArray<int> a = new NativeArray<int>(arrayLen, Allocator.TempJob);
+            NativeArray<int> b = new NativeArray<int>(arrayLen, Allocator.TempJob);
+            NativeArray<int> result = new NativeArray<int>(arrayLen, Allocator.TempJob);
 
-            for (int i = 0; i < SimpleParallelFor.N; ++i)
+            for (int i = 0; i < arrayLen; ++i)
             {
                 a[i] = 100 + i;
                 b[i] = 200 + i;
@@ -329,10 +341,10 @@ namespace Unity.Entities.Tests
             job.b = b;
             job.result = result;
 
-            JobHandle handle = job.Schedule(result.Length, 300);
+            JobHandle handle = job.Schedule(result.Length, 100);
             handle.Complete();
 
-            for (int i = 0; i < SimpleParallelFor.N; ++i)
+            for (int i = 0; i < arrayLen; ++i)
             {
                 Assert.AreEqual(300 + i * 2, result[i]);
             }
@@ -341,6 +353,38 @@ namespace Unity.Entities.Tests
             result.Dispose();
         }
 
+        public struct HashWriter : IJobParallelFor
+        {
+            [WriteOnly]
+            public NativeHashMap<int, int>.ParallelWriter result;
+
+            public void Execute(int i)
+            {
+                result.TryAdd(i, 17);
+            }
+        }
+
+        [Test]
+        public void ScheduleHashWriter()
+        {
+            NativeHashMap<int, int> result = new NativeHashMap<int, int>(100, Allocator.TempJob);
+
+            HashWriter job = new HashWriter
+            {
+                result = result.AsParallelWriter()
+            };
+            JobHandle handle = job.Schedule(100, 10);
+            handle.Complete();
+
+            for (int i = 0; i < 100; ++i)
+            {
+                Assert.AreEqual(17, result[i]);
+            }
+
+            result.Dispose();
+        }
+
+        [BurstCompile]
         public struct HashWriterParallelFor : IJobParallelFor
         {
             [WriteOnly]
@@ -349,20 +393,10 @@ namespace Unity.Entities.Tests
             [WriteOnly]
             public NativeHashMap<int, bool>.ParallelWriter threadMap;
 
-            public static int nCalls;
-
-            public unsafe void Execute(int i)
+            public void Execute(int i)
             {
                 result.TryAdd(i, 17);
                 threadMap.TryAdd(threadMap.m_ThreadIndex, true);
-                nCalls++;
-
-#if UNITY_DOTSPLAYER    // Don't have the library in the editor that grants access.
-                AssertOnThread(result.m_Safety.IsAllowedToWrite());
-                AssertOnThread(!result.m_Safety.IsAllowedToRead());
-                AssertOnThread(threadMap.m_Safety.IsAllowedToWrite());
-                AssertOnThread(!threadMap.m_Safety.IsAllowedToRead());
-#endif
             }
         }
 
@@ -381,29 +415,12 @@ namespace Unity.Entities.Tests
                 threadMap = threadMap.AsParallelWriter()
             };
 
-            JobHandle handle = job.Schedule(MAPSIZE, 10);
-            handle.Complete();
+            job.Schedule(MAPSIZE, 5).Complete();
 
             for (int i = 0; i < MAPSIZE; ++i)
             {
                 Assert.AreEqual(17, map[i]);
             }
-
-            var workerCount = JobsUtility.JobWorkerCount;
-
-#if !UNITY_SINGLETHREADED_JOBS
-            if (workerCount > 1)
-            {
-                Assert.IsTrue(threadMap.Length > 1);              // should have run in parallel, and used different thread indices
-            }
-            else
-            {
-                Assert.That(threadMap.Length == 1);
-            }
-#else
-            Assert.IsTrue(threadMap.Length == 1);    // only have one thread.
-            Assert.IsTrue(threadMap[0] == true);     // and it should be job index 0
-#endif
 
             map.Dispose();
             threadMap.Dispose();
@@ -411,7 +428,7 @@ namespace Unity.Entities.Tests
 
         public struct SimpleParallelForDefer : IJobParallelForDefer
         {
-            public const int N = 10000 * NMULT;
+            public const int N = 1000;
 
             [ReadOnly] public NativeList<int> a;
             [ReadOnly] public NativeArray<int> b;
@@ -476,7 +493,7 @@ namespace Unity.Entities.Tests
             var lengthValue = new NativeArray<int>(1, Allocator.TempJob);
             lengthValue[0] = SimpleParallelForDefer.N;
 
-            JobHandle handle = job.Schedule((int*) lengthValue.GetUnsafePtr(), 300);
+            JobHandle handle = job.Schedule((int*)lengthValue.GetUnsafePtr(), 300);
             handle.Complete();
 
             for (int i = 0; i < SimpleParallelFor.N; ++i)
@@ -492,7 +509,7 @@ namespace Unity.Entities.Tests
 
         public struct SimpleParallelForBatch : IJobParallelForBatch
         {
-            public const int N = 10000 * NMULT;
+            public const int N = 1000;
 
             [ReadOnly] public NativeArray<int> a;
             [ReadOnly] public NativeArray<int> b;
@@ -541,13 +558,13 @@ namespace Unity.Entities.Tests
 
         public struct HashWriterJob : IJob
         {
-            public const int N = 1000 * NMULT;
+            public const int N = 1000;
             // Don't declare [WriteOnly]. Write only is "automatic" for the ParallelWriter
             public NativeHashMap<int, int>.ParallelWriter result;
 
             public void Execute()
             {
-#if UNITY_DOTSPLAYER    // Don't have the C# version in the editor.
+#if UNITY_DOTSPLAYER && ENABLE_UNITY_COLLECTIONS_CHECKS   // Don't have the C# version in the editor.
                 Assert.IsTrue(result.m_Safety.IsAllowedToWrite());
                 Assert.IsTrue(!result.m_Safety.IsAllowedToRead());
 #endif
@@ -595,15 +612,14 @@ namespace Unity.Entities.Tests
         }
 
         [Test]
-        public void ScheduleSimpleIJobChunk()
+        public void TestSimpleIJobChunk([Values(0, 1, 2, 3)] int mode, [Values(1, 100)] int n)
         {
-            const int N = 10000 * NMULT;
-            NativeArray<Entity> eArr = new NativeArray<Entity>(N, Allocator.TempJob);
+            NativeArray<Entity> eArr = new NativeArray<Entity>(n, Allocator.TempJob);
             var arch = m_Manager.CreateArchetype(typeof(EcsTestData));
 
             m_Manager.CreateEntity(arch, eArr);
 
-            for (int i = 0; i < N; ++i)
+            for (int i = 0; i < n; ++i)
             {
                 m_Manager.SetComponentData(eArr[i], new EcsTestData() {value = 10 + i});
             }
@@ -616,9 +632,23 @@ namespace Unity.Entities.Tests
                 testType = m_Manager.GetArchetypeChunkComponentType<EcsTestData>(false),
                 listOfT = listOfInt
             };
-            job.Schedule(query).Complete();
+            switch (mode)
+            {
+                case 0:
+                    job.Schedule(query).Complete();
+                    break;
+                case 1:
+                    job.ScheduleParallel(query).Complete();
+                    break;
+                case 2:
+                    job.ScheduleSingle(query).Complete();
+                    break;
+                case 3:
+                    job.Run(query);
+                    break;
+            }
 
-            for (int i = 0; i < N; ++i)
+            for (int i = 0; i < n; ++i)
             {
                 EcsTestData data = m_Manager.GetComponentData<EcsTestData>(eArr[i]);
                 Assert.AreEqual(10 + i + 100, data.value);
@@ -627,40 +657,5 @@ namespace Unity.Entities.Tests
             listOfInt.Dispose();
             eArr.Dispose();
         }
-
-        [Test]
-        public void RunSimpleIJobChunk()
-        {
-            const int N = 10000 * NMULT;
-            NativeArray<Entity> eArr = new NativeArray<Entity>(N, Allocator.TempJob);
-            var arch = m_Manager.CreateArchetype(typeof(EcsTestData));
-
-            m_Manager.CreateEntity(arch, eArr);
-
-            for (int i = 0; i < N; ++i)
-            {
-                m_Manager.SetComponentData(eArr[i], new EcsTestData() {value = 10 + i});
-            }
-
-            NativeList<int> listOfInt = new NativeList<int>(1, Allocator.TempJob);
-
-            EntityQuery query = EmptySystem.GetEntityQuery(typeof(EcsTestData));
-            var job = new SimpleChunk<int>
-            {
-                testType = m_Manager.GetArchetypeChunkComponentType<EcsTestData>(false),
-                listOfT = listOfInt
-            };
-            job.Run(query);
-
-            for (int i = 0; i < N; ++i)
-            {
-                EcsTestData data = m_Manager.GetComponentData<EcsTestData>(eArr[i]);
-                Assert.AreEqual(10 + i + 100, data.value);
-            }
-
-            listOfInt.Dispose();
-            eArr.Dispose();
-        }
-
     }
 }

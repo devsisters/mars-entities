@@ -1,3 +1,8 @@
+#if !UNITY_DOTSPLAYER
+// https://unity3d.atlassian.net/browse/DOTSR-1432
+// TODO: IL2CPP_TEST_RUNNER doesn't support TextFixture with argument and other calls. Note these
+// are also generally flagged with DotsRuntimeFixme.
+
 using System;
 using System.Linq;
 using NUnit.Framework;
@@ -11,7 +16,7 @@ namespace Unity.Entities.Tests
     [TestFixture("CompleteJob1")]
     [TestFixture("CompleteJob2")]
     [TestFixture("CompleteNoJobs")]
-    [StandaloneFixme]
+    [DotsRuntimeFixme]
     class EntityQuerySyncChangeFilterTypesTests : ECSTestsFixture
     {
         bool completeJob1;
@@ -42,14 +47,14 @@ namespace Unity.Entities.Tests
             job1 = new SetComponentDataJob_EcsTestData {value = new EcsTestData(1)}.Schedule(m_Manager.CreateEntityQuery(typeof(EcsTestData)));
             job2 = new SetComponentDataJob_EcsTestData2 {value = new EcsTestData2(2)}.Schedule(m_Manager.CreateEntityQuery(typeof(EcsTestData2)));
 
-            if(completeJob1)
+            if (completeJob1)
                 job1.Complete();
 
-            if(completeJob2)
+            if (completeJob2)
                 job2.Complete();
 
             entityQuery = m_Manager.CreateEntityQuery(typeof(EcsTestData), typeof(EcsTestData2));
-            entityQuery.SetChangedVersionFilter(new ComponentType[]{ComponentType.ReadWrite<EcsTestData>(), ComponentType.ReadWrite<EcsTestData2>()});
+            entityQuery.SetChangedVersionFilter(new ComponentType[] {ComponentType.ReadWrite<EcsTestData>(), ComponentType.ReadWrite<EcsTestData2>()});
             entityQuery.SetChangedFilterRequiredVersion(10);
         }
 
@@ -65,12 +70,13 @@ namespace Unity.Entities.Tests
 
         void AssertThrowsIfAnyJobNotCompleted(TestDelegate code)
         {
-            if(completeJob1 && completeJob2)
+            if (completeJob1 && completeJob2)
                 Assert.DoesNotThrow(code);
             else
                 Assert.Throws<InvalidOperationException>(code);
         }
 
+#pragma warning disable 618
         public struct SetComponentDataJob_EcsTestData : IJobForEach<EcsTestData>
         {
             public EcsTestData value;
@@ -82,6 +88,7 @@ namespace Unity.Entities.Tests
             public EcsTestData2 value;
             public void Execute(ref EcsTestData2 component) => component = value;
         }
+#pragma warning restore 618
 
         [Test]
         public void CommandBuffer_AddComponentWithEntityQuery_Syncs_ChangeFilterTypes()
@@ -126,31 +133,32 @@ namespace Unity.Entities.Tests
         [Test]
         public void EntityManager_RemoveComponentWithEntityQuery_Syncs_ChangeFilterTypes()
         {
-            AssertThrowsIfAnyJobNotCompleted(() =>m_Manager.RemoveComponent(entityQuery, ComponentType.ReadWrite<EcsTestData>()));
+            AssertThrowsIfAnyJobNotCompleted(() => m_Manager.RemoveComponent(entityQuery, ComponentType.ReadWrite<EcsTestData>()));
         }
 
         [Test]
         public void EntityManager_AddComponentWithEntityQuery_Syncs_ChangeFilterTypes()
         {
-            AssertThrowsIfAnyJobNotCompleted(() =>m_Manager.AddComponent(entityQuery, ComponentType.ReadWrite<EcsTestData3>()));
+            AssertThrowsIfAnyJobNotCompleted(() => m_Manager.AddComponent(entityQuery, ComponentType.ReadWrite<EcsTestData3>()));
         }
 
         [Test]
         public void EntityManager_AddChunkComponentDataWithEntityQuery_Syncs_ChangeFilterTypes()
         {
-            AssertThrowsIfAnyJobNotCompleted(() =>m_Manager.AddChunkComponentData(entityQuery, new EcsTestData3(7)));
+            AssertThrowsIfAnyJobNotCompleted(() => m_Manager.AddChunkComponentData(entityQuery, new EcsTestData3(7)));
         }
 
         [Test]
         public void EntityManager_RemoveChunkComponentDataWithEntityQuery_Syncs_ChangeFilterTypes()
         {
-            AssertThrowsIfAnyJobNotCompleted(() =>m_Manager.RemoveChunkComponentData<EcsTestData3>(entityQuery));
+            AssertThrowsIfAnyJobNotCompleted(() => m_Manager.RemoveChunkComponentData<EcsTestData3>(entityQuery));
         }
 
         [Test]
         public void EntityManager_AddSharedComponentDataWithEntityQuery_Syncs_ChangeFilterTypes()
         {
-            AssertThrowsIfAnyJobNotCompleted(() =>m_Manager.AddSharedComponentData(entityQuery, new EcsTestSharedComp(7)));
+            AssertThrowsIfAnyJobNotCompleted(() => m_Manager.AddSharedComponentData(entityQuery, new EcsTestSharedComp(7)));
         }
     }
 }
+#endif // !UNITY_DOTSPLAYER

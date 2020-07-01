@@ -23,12 +23,12 @@ namespace Unity.Entities.CodeGen.Tests
 
             CollectionAssert.AreEqual(new[]
             {
-            nameof(LambdaJobQueryConstructionMethods.WithEntityQueryOptions),
-            nameof(LambdaJobDescriptionConstructionMethods.WithBurst),
-            nameof(LambdaJobQueryConstructionMethods.WithNone),
-            nameof(LambdaJobQueryConstructionMethods.WithChangeFilter),
-            nameof(LambdaJobDescriptionConstructionMethods.WithName),
-            nameof(LambdaForEachDescriptionConstructionMethods.ForEach),
+                nameof(LambdaJobQueryConstructionMethods.WithEntityQueryOptions),
+                nameof(LambdaJobDescriptionConstructionMethods.WithBurst),
+                nameof(LambdaJobQueryConstructionMethods.WithNone),
+                nameof(LambdaJobQueryConstructionMethods.WithChangeFilter),
+                nameof(LambdaJobDescriptionConstructionMethods.WithName),
+                nameof(LambdaForEachDescriptionConstructionMethods.ForEach),
             }, icm.Select(i => i.MethodName));
 
 
@@ -43,9 +43,9 @@ namespace Unity.Entities.CodeGen.Tests
             }, icm.Select(i => i.Arguments.Length));
 
             Assert.AreEqual("MyJobName", icm[4].Arguments[0]);
-            CollectionAssert.AreEqual(new[] {nameof(Translation), nameof(Velocity)},icm[3].TypeArguments.Select(t => t.Name));
+            CollectionAssert.AreEqual(new[] {nameof(Translation), nameof(Velocity)}, icm[3].TypeArguments.Select(t => t.Name));
 
-            Assert.AreEqual(EntityQueryOptions.IncludePrefab, (EntityQueryOptions) icm[0].Arguments.Single());
+            Assert.AreEqual(EntityQueryOptions.IncludePrefab, (EntityQueryOptions)icm[0].Arguments.Single());
         }
 
         class WithForEachSystem : JobComponentSystem
@@ -56,19 +56,19 @@ namespace Unity.Entities.CodeGen.Tests
 
                 return Entities
                     .WithEntityQueryOptions(EntityQueryOptions.IncludePrefab)
-                    .WithBurst(synchronousCompilation:true)
+                    .WithBurst(synchronousCompilation: true)
                     .WithNone<Boid>()
                     .WithChangeFilter<Translation, Velocity>()
                     .WithName("MyJobName")
                     .ForEach(
-                        (ref Translation translation, ref Boid boid,in Velocity velocity) =>
+                        (ref Translation translation, ref Boid boid, in Velocity velocity) =>
                         {
                             translation.Value += velocity.Value * dt;
                         })
                     .Schedule(inputDeps);
             }
         }
-        
+
         [Test]
         public void SingleJobTest()
         {
@@ -78,15 +78,15 @@ namespace Unity.Entities.CodeGen.Tests
 
             var icm = forEachDescriptionConstruction.InvokedConstructionMethods;
 
-            Assert.AreEqual( LambdaJobDescriptionKind.Job, forEachDescriptionConstruction.Kind);
-            
+            Assert.AreEqual(LambdaJobDescriptionKind.Job, forEachDescriptionConstruction.Kind);
+
             CollectionAssert.AreEqual(new[]
             {
                 nameof(LambdaJobDescriptionConstructionMethods.WithBurst),
                 nameof(LambdaJobDescriptionConstructionMethods.WithName),
-                nameof(LambdaSimpleJobDescriptionConstructionMethods.WithCode),
+                nameof(LambdaSingleJobDescriptionConstructionMethods.WithCode),
             }, icm.Select(i => i.MethodName));
-            
+
             CollectionAssert.AreEqual(new[]
             {
                 3,
@@ -102,7 +102,7 @@ namespace Unity.Entities.CodeGen.Tests
             protected override JobHandle OnUpdate(JobHandle inputDeps)
             {
                 return Job
-                    .WithBurst(synchronousCompilation:true)
+                    .WithBurst(synchronousCompilation: true)
                     .WithName("MyJobName")
                     .WithCode(()
                         =>
@@ -111,7 +111,7 @@ namespace Unity.Entities.CodeGen.Tests
                     .Schedule(inputDeps);
             }
         }
-        
+
 #if ENABLE_DOTS_COMPILER_CHUNKS
         [Test]
         public void JobChunkTest()
@@ -121,14 +121,14 @@ namespace Unity.Entities.CodeGen.Tests
             var forEachDescriptionConstruction = LambdaJobDescriptionConstruction.FindIn(methodToAnalyze).Single();
 
             var icm = forEachDescriptionConstruction.InvokedConstructionMethods;
-            Assert.AreEqual( LambdaJobDescriptionKind.Chunk, forEachDescriptionConstruction.Kind);
+            Assert.AreEqual(LambdaJobDescriptionKind.Chunk, forEachDescriptionConstruction.Kind);
             CollectionAssert.AreEqual(new[]
             {
                 nameof(LambdaJobDescriptionConstructionMethods.WithBurst),
                 nameof(LambdaJobDescriptionConstructionMethods.WithName),
                 nameof(LambdaJobChunkDescriptionConstructionMethods.ForEach),
             }, icm.Select(i => i.MethodName));
-            
+
             CollectionAssert.AreEqual(new[]
             {
                 4,
@@ -145,12 +145,12 @@ namespace Unity.Entities.CodeGen.Tests
             {
                 return Chunks
                     .WithName("MyJobName")
-                    .ForEach(delegate(ArchetypeChunk chunk, int index, int query) {  })
+                    .ForEach(delegate(ArchetypeChunk chunk, int index, int query) {})
                     .Schedule(inputDeps);
             }
         }
 #endif
-        
+
         [Test]
         public void DoesNotCaptureTest()
         {
@@ -173,7 +173,7 @@ namespace Unity.Entities.CodeGen.Tests
                     .Schedule(inputDependency);
             }
         }
-        
+
         [Test]
         public void ControlFlowInsideWithChainTest()
         {
@@ -202,7 +202,7 @@ namespace Unity.Entities.CodeGen.Tests
         {
             AssertProducesError(typeof(UseConstructionMethodMultipleTimes), nameof(UserError.DC0009), "WithName");
         }
-        
+
         public class UseConstructionMethodMultipleTimes : JobComponentSystem
         {
             protected override JobHandle OnUpdate(JobHandle inputDeps)
@@ -218,14 +218,66 @@ namespace Unity.Entities.CodeGen.Tests
                     .Schedule(inputDeps);
             }
         }
-        
-        
+
+        [Test]
+        public void InvalidJobNamesThrow()
+        {
+            AssertProducesError(typeof(InvalidJobNameWithSpaces), nameof(UserError.DC0043), "WithName");
+            AssertProducesError(typeof(InvalidJobNameStartsWithDigit), nameof(UserError.DC0043), "WithName");
+            AssertProducesError(typeof(InvalidJobNameCompilerReservedName), nameof(UserError.DC0043), "WithName");
+        }
+
+        public class InvalidJobNameWithSpaces : JobComponentSystem
+        {
+            protected override JobHandle OnUpdate(JobHandle inputDeps)
+            {
+                return Entities
+                    .WithName("This name may not contain spaces")
+                    .ForEach(
+                        (ref Translation translation, ref Boid boid, in Velocity velocity) =>
+                        {
+                            translation.Value += velocity.Value;
+                        })
+                    .Schedule(inputDeps);
+            }
+        }
+
+        public class InvalidJobNameStartsWithDigit : JobComponentSystem
+        {
+            protected override JobHandle OnUpdate(JobHandle inputDeps)
+            {
+                return Entities
+                    .WithName("1job")
+                    .ForEach(
+                        (ref Translation translation, ref Boid boid, in Velocity velocity) =>
+                        {
+                            translation.Value += velocity.Value;
+                        })
+                    .Schedule(inputDeps);
+            }
+        }
+
+        public class InvalidJobNameCompilerReservedName : JobComponentSystem
+        {
+            protected override JobHandle OnUpdate(JobHandle inputDeps)
+            {
+                return Entities
+                    .WithName("__job")
+                    .ForEach(
+                        (ref Translation translation, ref Boid boid, in Velocity velocity) =>
+                        {
+                            translation.Value += velocity.Value;
+                        })
+                    .Schedule(inputDeps);
+            }
+        }
+
         [Test]
         public void ForgotToAddForEachTest()
         {
             AssertProducesError(typeof(ForgotToAddForEach), nameof(UserError.DC0006));
         }
-        
+
         class ForgotToAddForEach : TestJobComponentSystem
         {
             void Test()
@@ -235,7 +287,7 @@ namespace Unity.Entities.CodeGen.Tests
                     .Schedule(default);
             }
         }
-        
+
         [Test]
         public void WithReadOnlyCapturedVariableTest()
         {
@@ -244,20 +296,20 @@ namespace Unity.Entities.CodeGen.Tests
             var withReadOnly = description.InvokedConstructionMethods.Single(m => m.MethodName == nameof(LambdaJobDescriptionConstructionMethods.WithReadOnly));
             Assert.IsInstanceOf<FieldDefinition>(withReadOnly.Arguments.Single());
         }
-        
+
         class WithReadOnlyCapturedVariable : TestJobComponentSystem
         {
             void Test()
             {
                 NativeArray<int> myarray = new NativeArray<int>();
-                
+
                 Entities
                     .WithReadOnly(myarray)
                     .ForEach((ref Translation translation) => translation.Value += myarray[0])
                     .Schedule(default);
             }
         }
-        
+
         [Test]
         public void WithReadOnlyCapturedVariableFromTwoScopesTest()
         {
@@ -297,10 +349,10 @@ namespace Unity.Entities.CodeGen.Tests
             protected override JobHandle OnUpdate(JobHandle inputDeps)
             {
                 Entities.ForEach(
-                        (ref Translation translation, ref Boid boid, in Velocity velocity) =>
-                        {
-                            translation.Value += velocity.Value;
-                        });
+                    (ref Translation translation, ref Boid boid, in Velocity velocity) =>
+                    {
+                        translation.Value += velocity.Value;
+                    });
                 return default;
             }
         }
@@ -326,6 +378,189 @@ namespace Unity.Entities.CodeGen.Tests
                 }
 
                 return default;
+            }
+        }
+
+        [Test]
+        public void WithLambdaStoredInFieldTest()
+        {
+            AssertProducesError(typeof(WithLambdaStoredInFieldSystem), nameof(UserError.DC0044));
+        }
+
+        public class WithLambdaStoredInFieldSystem : JobComponentSystem
+        {
+            UniversalDelegates.R<Translation> _translationAction;
+
+            protected override JobHandle OnUpdate(JobHandle inputDependencies)
+            {
+                _translationAction = (ref Translation t) => {};
+                return Entities.ForEach(_translationAction).Schedule(inputDependencies);
+            }
+        }
+
+        [Test]
+        public void WithLambdaStoredInVariableTest()
+        {
+            AssertProducesError(typeof(WithLambdaStoredInVariableSystem), nameof(UserError.DC0044));
+        }
+
+        public class WithLambdaStoredInVariableSystem : JobComponentSystem
+        {
+            protected override JobHandle OnUpdate(JobHandle inputDependencies)
+            {
+                UniversalDelegates.R<Translation> translationAction = (ref Translation t) => {};
+                return Entities.ForEach(translationAction).Schedule(inputDependencies);
+            }
+        }
+
+        [Test]
+        public void WithLambdaStoredInArgTest()
+        {
+            AssertProducesError(typeof(WithLambdaStoredInArgSystem), nameof(UserError.DC0044));
+        }
+
+        public class WithLambdaStoredInArgSystem : JobComponentSystem
+        {
+            JobHandle Test(UniversalDelegates.R<Translation> action)
+            {
+                return Entities.ForEach(action).Schedule(default);
+            }
+
+            protected override JobHandle OnUpdate(JobHandle inputDeps)
+            {
+                return Test((ref Translation t) => {});
+            }
+        }
+
+        [Test]
+        public void WithLambdaReturnedFromMethodTest()
+        {
+            AssertProducesError(typeof(WithLambdaReturnedFromMethodSystem), nameof(UserError.DC0044));
+        }
+
+        public class WithLambdaReturnedFromMethodSystem : JobComponentSystem
+        {
+            protected override JobHandle OnUpdate(JobHandle inputDeps)
+            {
+                return Entities.ForEach(GetAction()).Schedule(default);
+            }
+
+            static UniversalDelegates.R<Translation> GetAction()
+            {
+                return (ref Translation t) => {};
+            }
+        }
+
+        [Test]
+        public void WithGetComponentAndCaptureOfThisTest()
+        {
+            AssertProducesError(typeof(WithGetComponentAndCaptureOfThis), nameof(UserError.DC0001), "someField");
+        }
+
+        public class WithGetComponentAndCaptureOfThis : SystemBase
+        {
+            float someField = 3.0f;
+
+            protected override void OnUpdate()
+            {
+                Entities
+                    .ForEach(
+                    (ref Translation translation) =>
+                    {
+                        var vel = GetComponent<Velocity>(default);
+                        translation = new Translation() {Value = someField * vel.Value};
+                    })
+                    .Schedule();
+            }
+        }
+
+        [Test]
+        public void WithGetComponentAndCaptureOfThisAndVarTest()
+        {
+            AssertProducesError(typeof(WithGetComponentAndCaptureOfThisAndVar), nameof(UserError.DC0001), "someField");
+        }
+
+        public class WithGetComponentAndCaptureOfThisAndVar : SystemBase
+        {
+            float someField = 3.0f;
+
+            protected override void OnUpdate()
+            {
+                float someVar = 2.0f;
+                Entities
+                    .ForEach(
+                    (ref Translation translation) =>
+                    {
+                        var vel = GetComponent<Velocity>(default);
+                        translation = new Translation() {Value = someField * vel.Value * someVar};
+                    })
+                    .Schedule();
+            }
+        }
+
+        [Test]
+        public void GetComponentWithConditionTest()
+        {
+            AssertProducesError(typeof(GetComponentWithCondition), nameof(UserError.DC0045), "GetComponent");
+        }
+
+        public class GetComponentWithCondition : SystemBase
+        {
+            protected override void OnUpdate()
+            {
+                Entities.ForEach((Entity entity, ref Translation tde) =>
+                {
+                    Entity e1 = default, e2 = default;
+                    tde.Value += GetComponent<Velocity>(tde.Value > 1 ? e1 : e2).Value;
+                }).Schedule();
+            }
+        }
+
+        [Test]
+        public void SetComponentWithPermittedAliasTest()
+        {
+            AssertProducesNoError(typeof(SetComponentWithPermittedAlias));
+        }
+
+        public class SetComponentWithPermittedAlias : SystemBase
+        {
+            protected override void OnUpdate()
+            {
+                Entities.ForEach((Entity e, in Translation data) => {
+                    GetComponent<Translation>(e);
+                }).Run();
+            }
+        }
+
+        [Test]
+        public void SetComponentWithNotPermittedParameterThatAliasesTestTest()
+        {
+            AssertProducesError(typeof(SetComponentWithNotPermittedParameterThatAliasesTest), nameof(UserError.DC0047), "Translation");
+        }
+
+        public class SetComponentWithNotPermittedParameterThatAliasesTest : SystemBase
+        {
+            protected override void OnUpdate()
+            {
+                Entities.ForEach((Entity e, ref Translation data) => {
+                    var translation = GetComponent<Translation>(e);
+                }).Run();
+            }
+        }
+
+        [Test]
+        public void SetComponentWithNotPermittedComponentAccessThatAliasesTest()
+        {
+            AssertProducesError(typeof(SetComponentWithNotPermittedComponentAccessThatAliases), nameof(UserError.DC0046), "SetComponent");
+        }
+
+        public class SetComponentWithNotPermittedComponentAccessThatAliases : SystemBase
+        {
+            protected override void OnUpdate()
+            {
+                Entities.ForEach((Entity e, in Translation data) => {
+                    SetComponent(e, new Translation());
+                }).Run();
             }
         }
     }

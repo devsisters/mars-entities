@@ -34,14 +34,12 @@ namespace Unity.Scenes
             _Assets[guid] = resolved;
         }
 
-
         public void UpdateObjectManifest(Hash128 guid, AssetObjectManifest manifest)
         {
             var resolved = _Assets[guid];
             resolved.AssetObjectManifest = manifest;
             _Assets[guid] = resolved;
         }
-
 
         public void Validate(Hash128 guid)
         {
@@ -59,7 +57,8 @@ namespace Unity.Scenes
 
             if (resolved.AssetObjectManifest == null)
             {
-                Debug.LogError($"GlobalAssetObjectResolver Validate failed! => ObjectManifest in '{guid.ToString()}' not loadable");
+                if (!resolved.AssetBundle.isStreamedSceneAssetBundle)
+                    Debug.LogError($"GlobalAssetObjectResolver Validate failed! => ObjectManifest in '{guid.ToString()}' not loadable");
                 return;
             }
 
@@ -89,7 +88,7 @@ namespace Unity.Scenes
             if (!_Assets.TryGetValue(objID.AssetGUID, out var manifest))
                 return null;
 
-            //@TODO-PERF: sort by GlobalObjectIDs and do binary search to find the right object  
+            //@TODO-PERF: sort by GlobalObjectIDs and do binary search to find the right object
             var objectIDs = manifest.AssetObjectManifest.GlobalObjectIds;
             for (int i = 0; i != objectIDs.Length; i++)
             {
@@ -105,6 +104,18 @@ namespace Unity.Scenes
             var globalObjectIDsPtr = (RuntimeGlobalObjectId*)globalObjectIDs.GetUnsafePtr();
             for (int i = 0; i != globalObjectIDs.Length; i++)
                 objects[i] = ResolveObject(globalObjectIDsPtr[i]);
+        }
+
+        public void UnloadAsset(Hash128 assetId)
+        {
+            if (_Assets.TryGetValue(assetId, out var resolved))
+            {
+                if (resolved.AssetBundle != null)
+                    resolved.AssetBundle.Unload(true);
+                if (resolved.AssetObjectManifest != null)
+                    Object.DestroyImmediate(resolved.AssetObjectManifest);
+                _Assets.Remove(assetId);
+            }
         }
 
         public AssetBundle GetAssetBundle(Hash128 requestedGUID)

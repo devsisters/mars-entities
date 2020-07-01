@@ -7,7 +7,7 @@ using GameObject = UnityEngine.GameObject;
 
 namespace Unity.Entities.Conversion
 {
-    interface IConversionEventData { }
+    interface IConversionEventData {}
 
     struct LogEventData : IConversionEventData
     {
@@ -72,7 +72,7 @@ namespace Unity.Entities.Conversion
         {
             if (!m_HeadIdIndices.TryGetValue(objectInstanceId, out var headIdIndex))
             {
-                headIdIndex = m_HeadIdIndices.Length;
+                headIdIndex = m_HeadIdIndices.Count();
                 m_HeadIdIndices.Add(objectInstanceId, headIdIndex);
 
                 var headIdsCapacity = headIdIndex + 1;
@@ -114,7 +114,7 @@ namespace Unity.Entities.Conversion
         // requires existing sublist, walks to end and adds, returns count (can be slow with large count)
         (int id, int serial) AddTail<T>(int objectInstanceId, ref MultiList<T> store) =>
             m_HeadIdIndices.TryGetValue(objectInstanceId, out var headIdIndex)
-                ? store.AddTail(headIdIndex) : (-1, 0);
+            ? store.AddTail(headIdIndex) : (-1, 0);
 
         int GetHeadId<T>(int objectInstanceId, ref MultiList<T> store)
         {
@@ -248,8 +248,8 @@ namespace Unity.Entities.Conversion
             m_HybridTypes.Add(index, type);
         }
 
-        public MultiListEnumerator<Type> HybridTypes(int headId) =>
-            m_HybridTypes.SelectListAt(headId);
+        public MultiListEnumerator<Type> HybridTypes(int headIdIndex) =>
+            m_HybridTypes.SelectList(headIdIndex);
 
         public IEnumerable<(int objectInstanceId, LogEventData eventData)> SelectLogEventsFast() =>
             SelectJournalData(m_LogEvents);

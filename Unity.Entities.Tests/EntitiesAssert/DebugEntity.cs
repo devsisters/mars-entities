@@ -1,3 +1,5 @@
+#if !UNITY_DOTSPLAYER_IL2CPP
+// https://unity3d.atlassian.net/browse/DOTSR-1432
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -5,23 +7,23 @@ using System.Runtime.InteropServices;
 
 namespace Unity.Entities.Tests
 {
-    public class DebugEntity 
+    public class DebugEntity
     {
         [DebuggerBrowsable(DebuggerBrowsableState.Never)]
         readonly DebugComponent[] m_Components;
-        
+
         [DebuggerBrowsable(DebuggerBrowsableState.Never)]
         public string Name { get; }
-        
+
         public Entity Entity { get; }
-        
+
         [DebuggerBrowsable(DebuggerBrowsableState.RootHidden)]
         public IReadOnlyList<DebugComponent> Components => m_Components;
 
         public DebugEntity(Entity entity, params DebugComponent[] components)
         {
             Entity = entity;
-            Name = entity.ToString(); 
+            Name = entity.ToString();
             m_Components = components;
         }
 
@@ -32,7 +34,7 @@ namespace Unity.Entities.Tests
             #endif
             if (string.IsNullOrEmpty(Name))
                 Name = entity.ToString();
-            
+
             Entity = entity;
 
             using (var componentTypes = entityManager.GetComponentTypes(entity))
@@ -43,16 +45,16 @@ namespace Unity.Entities.Tests
                     m_Components[i] = new DebugComponent(entityManager, entity, componentTypes[i]);
             }
         }
-        
+
         public static List<DebugEntity> GetAllEntities(EntityManager entityManager)
         {
             using (var entities = entityManager.GetAllEntities())
             {
                 var debugEntities = new List<DebugEntity>(entities.Length);
-                
+
                 foreach (var entity in entities)
                     debugEntities.Add(new DebugEntity(entityManager, entity));
-                
+
                 // consider rando-sorting debugEntities if a certain command line flag is set to detect instabilities
 
                 debugEntities.Sort((x, y) => x.Entity.Index.CompareTo(y.Entity.Index));
@@ -63,22 +65,22 @@ namespace Unity.Entities.Tests
 
         public override string ToString() => $"{Entity} {Name} ({m_Components.Length} components)";
     }
-    
+
     public struct DebugComponent
     {
         public Type Type;
-        
+
         // if IBufferElementData, this will be a object[] but Type will still be typeof(T)
         public object Data;
-        
+
         public unsafe DebugComponent(EntityManager entityManager, Entity entity, ComponentType componentType)
         {
             Type = componentType.GetManagedType();
             Data = null;
-                    
+
             if (Type.IsClass)
             {
-                Data = entityManager.GetComponentObject<object>(entity, componentType); 
+                Data = entityManager.GetComponentObject<object>(entity, componentType);
             }
             else if (typeof(IComponentData).IsAssignableFrom(Type))
             {
@@ -87,6 +89,7 @@ namespace Unity.Entities.Tests
                 else
                 {
                     var dataPtr = entityManager.GetComponentDataRawRO(entity, componentType.TypeIndex);
+                    // this doesn't work for structs that contain BlobAssetReferences
                     Data = Marshal.PtrToStructure((IntPtr)dataPtr, Type);
                 }
             }
@@ -113,7 +116,7 @@ namespace Unity.Entities.Tests
                 for (var i = 0; i < length; ++i)
                 {
                     var elementPtr = bufferPtr + (elementSize * i);
-                    array.SetValue(Marshal.PtrToStructure((IntPtr)elementPtr, Type), i); 
+                    array.SetValue(Marshal.PtrToStructure((IntPtr)elementPtr, Type), i);
                 }
             }
             else
@@ -121,7 +124,7 @@ namespace Unity.Entities.Tests
         }
 
         public override string ToString() => ToString(-1);
-        
+
         public string ToString(int maxDataLen)
         {
             string str;
@@ -134,7 +137,7 @@ namespace Unity.Entities.Tests
 
             if (Data != null)
             {
-                var dataType = Data.GetType();   
+                var dataType = Data.GetType();
                 if (Type != null && !typeof(IBufferElementData).IsAssignableFrom(Type) && dataType != Type)
                     str += $"({dataType.Name})";
 
@@ -156,15 +159,34 @@ namespace Unity.Entities.Tests
                             else
                                 dataStr = dataStr.Substring(0, maxDataLen);
                         }
-                        
+
                         str += $"={dataStr}";
                     }
                 }
             }
             else
                 str += "=null";
-            
+
             return str;
         }
     }
+
+    public static class DebugEntityExtensions
+    {
+        public static bool HasComponent<T>(this DebugEntity de) => IndexOfComponent<T>(de) != -1;
+
+        public static int IndexOfComponent<T>(this DebugEntity de)
+        {
+            int idx = 0;
+            foreach (var c in de.Components)
+            {
+                if (c.Type == typeof(T))
+                    return idx;
+                idx++;
+            }
+
+            return -1;
+        }
+    }
 }
+#endif

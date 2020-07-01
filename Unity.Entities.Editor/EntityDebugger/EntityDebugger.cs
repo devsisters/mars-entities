@@ -1,5 +1,6 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
+using System.Linq;
 using UnityEditor;
 using UnityEngine;
 using UnityEditor.IMGUI.Controls;
@@ -7,7 +8,6 @@ using UnityEngine.Serialization;
 
 namespace Unity.Entities.Editor
 {
-    
     internal class EntityDebugger : EditorWindow
     {
         public delegate void SelectionChangeCallback(EntitySelectionProxy proxy);
@@ -29,8 +29,8 @@ namespace Unity.Entities.Editor
             }
             EntityDebugger.Instance.CreateSystemListView();
         }
-        
-        private const float kSystemListWidth = 350f;
+
+        private const float kSystemListWidth = 400f;
         private const float kChunkInfoViewWidth = 250f;
 
         public bool ShowingChunkInfoView
@@ -48,9 +48,16 @@ namespace Unity.Entities.Editor
                 }
             }
         }
+
         private bool showingChunkInfoView = true;
 
-        
+        const string k_ShowChunkInfoPreferencePath = "Unity.Entities.Editor.EntityDebugger.ShowChunkInfo";
+        bool ShowingChunkInfoViewPersistent
+        {
+            get => EditorPrefs.GetBool(k_ShowChunkInfoPreferencePath, true);
+            set => EditorPrefs.SetBool(k_ShowChunkInfoPreferencePath, value);
+        }
+
         private float CurrentEntityViewWidth =>
             Mathf.Max(100f, position.width - kSystemListWidth - (showingChunkInfoView ? kChunkInfoViewWidth : 0f));
 
@@ -59,7 +66,7 @@ namespace Unity.Entities.Editor
         {
             GetWindow<EntityDebugger>("Entity Debugger");
         }
-	
+
         class DebuggerStyles
         {
             public GUIStyle ToolbarStyle;
@@ -73,9 +80,9 @@ namespace Unity.Entities.Editor
             public GUIStyle BoxStyle;
             public GUIStyle ToolbarLabelStyle;
         }
-        
+
         private static DebuggerStyles Styles;
-	
+
         void InitStyles()
         {
             if (Styles == null)
@@ -246,7 +253,7 @@ namespace Unity.Entities.Editor
         }
 
         bool HasWorld() => SystemSelectionWorld != null || WorldSelection != null;
-        
+
         private void CreateEntityListView()
         {
             entityListView?.Dispose();
@@ -258,7 +265,7 @@ namespace Unity.Entities.Editor
                 () => SystemSelectionWorld ?? WorldSelection,
                 () => SystemSelection,
                 x => chunkInfoListView.SetChunkArray(x)
-                );
+            );
         }
 
         private void CreateSystemListView()
@@ -273,6 +280,7 @@ namespace Unity.Entities.Editor
         }
 
         [SerializeField] private bool ShowInactiveSystems;
+        [SerializeField] private bool ShowAllWorlds;
 
         private void CreateWorldPopup()
         {
@@ -284,8 +292,9 @@ namespace Unity.Entities.Editor
                 {
                     ShowInactiveSystems = !ShowInactiveSystems;
                     systemListView.Reload();
-                }
-                );
+                },
+                () => ShowAllWorlds,
+                v => ShowAllWorlds = v);
         }
 
         private void CreateChunkInfoListView()
@@ -308,6 +317,7 @@ namespace Unity.Entities.Editor
             CreateChunkInfoListView();
             systemListView.TouchSelection();
 
+            showingChunkInfoView = ShowingChunkInfoViewPersistent;
             EditorApplication.playModeStateChanged += OnPlayModeStateChange;
         }
 
@@ -336,6 +346,7 @@ namespace Unity.Entities.Editor
             if (selectionProxy)
                 DestroyImmediate(selectionProxy);
 
+            ShowingChunkInfoViewPersistent = showingChunkInfoView;
             EditorApplication.playModeStateChanged -= OnPlayModeStateChange;
         }
 
@@ -363,7 +374,7 @@ namespace Unity.Entities.Editor
 
                 if (systemListView == null)
                     return;
-          
+
                 if (systemListView.NeedsReload || entityQueryListView.NeedsReload || entityListView.NeedsReload || !filterUI.TypeListValid())
                     Repaint();
             }
@@ -373,7 +384,7 @@ namespace Unity.Entities.Editor
         {
             m_WorldPopup.OnGUI(showingPlayerLoop, EditorApplication.isPlaying ? lastPlayModeWorldSelection : lastEditModeWorldSelection, Styles.ToolbarDropdownStyle);
         }
-	
+
         private string SearchField(string search)
         {
             search = GUILayout.TextField(search, Styles.SearchFieldStyle, GUILayout.Width(Styles.SearchFieldWidth));
@@ -386,14 +397,14 @@ namespace Unity.Entities.Editor
             {
                 GUILayout.Box(GUIContent.none, Styles.SearchFieldCancelButtonEmpty);
             }
-	
+
             return search;
         }
 
         private void SystemList()
         {
             var rect = GUIHelpers.GetExpandingRect();
-            if (World.AllWorlds.Count != 0)
+            if (World.All.Count > 0)
             {
                 systemListView.OnGUI(rect);
             }
@@ -440,7 +451,7 @@ namespace Unity.Entities.Editor
             if (SystemSelection != null)
             {
                 entityQueryListView.SetWidth(CurrentEntityViewWidth);
-                var height = Mathf.Min(entityQueryListView.Height + Styles.BoxStyle.padding.vertical, position.height*0.5f);
+                var height = Mathf.Min(entityQueryListView.Height + Styles.BoxStyle.padding.vertical, position.height * 0.5f);
                 GUILayout.BeginVertical(Styles.BoxStyle, GUILayout.Height(height));
 
                 entityQueryListView.OnGUI(GUIHelpers.GetExpandingRect());
@@ -483,12 +494,12 @@ namespace Unity.Entities.Editor
         private void ChunkInfoView()
         {
             GUILayout.BeginVertical(Styles.BoxStyle);
-            
+
             GUILayout.BeginHorizontal();
             GUILayout.FlexibleSpace();
             GUILayout.Label($"Matching chunks: {entityListView.ChunkArray.Length}", Styles.LabelStyle);
             GUILayout.EndHorizontal();
-        
+
             chunkInfoListView.OnGUI(GUIHelpers.GetExpandingRect());
             if (chunkInfoListView.HasSelection())
             {
@@ -552,7 +563,7 @@ namespace Unity.Entities.Editor
 
                 if (HasWorld())
                 {
-                    // add a slight 1px left and right margin 
+                    // add a slight 1px left and right margin
                     GUILayout.BeginArea(new Rect(0, toolbarHeight, CurrentEntityViewWidth, position.height - toolbarHeight));
                     EntityQueryList();
                     EntityList();

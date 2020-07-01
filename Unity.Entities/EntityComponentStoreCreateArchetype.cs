@@ -11,7 +11,6 @@ namespace Unity.Entities
         // ----------------------------------------------------------------------------------------------------------
         // PUBLIC
         // ----------------------------------------------------------------------------------------------------------
-
         public Archetype* GetOrCreateArchetype(ComponentTypeInArchetype* inTypesSorted, int count)
         {
             var srcArchetype = GetExistingArchetype(inTypesSorted, count);
@@ -22,42 +21,18 @@ namespace Unity.Entities
 
             var types = stackalloc ComponentTypeInArchetype[count + 1];
 
-            // Setup Instantiable archetype
+            srcArchetype->InstantiateArchetype = CreateInstanceArchetype(inTypesSorted, count, types, srcArchetype, true);
+            srcArchetype->CopyArchetype = CreateInstanceArchetype(inTypesSorted, count, types, srcArchetype, false);
+
+            if (srcArchetype->InstantiateArchetype != null)
             {
-                UnsafeUtility.MemCpy(types, inTypesSorted, sizeof(ComponentTypeInArchetype) * count);
-
-                var hasCleanup = false;
-                var removedTypes = 0;
-                for (var t = 0; t < srcArchetype->TypesCount; ++t)
-                {
-                    var type = srcArchetype->Types[t];
-
-                    hasCleanup |= type.TypeIndex == m_CleanupEntityType;
-
-                    var skip = type.IsSystemStateComponent || type.TypeIndex == m_PrefabType;
-                    if (skip)
-                        ++removedTypes;
-                    else
-                        types[t - removedTypes] = srcArchetype->Types[t];
-                }
-
-                // Entity has already been destroyed, so it shouldn't be instantiated anymore
-                if (hasCleanup)
-                {
-                    srcArchetype->InstantiableArchetype = null;
-                }
-                else if (removedTypes > 0)
-                {
-                    var instantiableArchetype = GetOrCreateArchetype(types, count - removedTypes);
-
-                    srcArchetype->InstantiableArchetype = instantiableArchetype;
-                    Assert.IsTrue(instantiableArchetype->InstantiableArchetype == instantiableArchetype);
-                    Assert.IsTrue(instantiableArchetype->SystemStateResidueArchetype == null);
-                }
-                else
-                {
-                    srcArchetype->InstantiableArchetype = srcArchetype;
-                }
+                Assert.IsTrue(srcArchetype->InstantiateArchetype->InstantiateArchetype == srcArchetype->InstantiateArchetype);
+                Assert.IsTrue(srcArchetype->InstantiateArchetype->SystemStateResidueArchetype == null);
+            }
+            if (srcArchetype->CopyArchetype != null)
+            {
+                Assert.IsTrue(srcArchetype->CopyArchetype->CopyArchetype == srcArchetype->CopyArchetype);
+                Assert.IsTrue(srcArchetype->CopyArchetype->SystemStateResidueArchetype == null);
             }
 
 
@@ -95,7 +70,8 @@ namespace Unity.Entities
                 srcArchetype->SystemStateResidueArchetype = systemStateResidueArchetype;
 
                 Assert.IsTrue(systemStateResidueArchetype->SystemStateResidueArchetype == systemStateResidueArchetype);
-                Assert.IsTrue(systemStateResidueArchetype->InstantiableArchetype == null);
+                Assert.IsTrue(systemStateResidueArchetype->InstantiateArchetype == null);
+                Assert.IsTrue(systemStateResidueArchetype->CopyArchetype == null);
             }
 
             // Setup meta chunk archetype
@@ -127,6 +103,40 @@ namespace Unity.Entities
             return srcArchetype;
         }
 
+        Archetype* CreateInstanceArchetype(ComponentTypeInArchetype* inTypesSorted, int count, ComponentTypeInArchetype* types, Archetype* srcArchetype, bool removePrefab)
+        {
+            UnsafeUtility.MemCpy(types, inTypesSorted, sizeof(ComponentTypeInArchetype) * count);
+
+            var hasCleanup = false;
+            var removedTypes = 0;
+            for (var t = 0; t < srcArchetype->TypesCount; ++t)
+            {
+                var type = srcArchetype->Types[t];
+
+                hasCleanup |= type.TypeIndex == m_CleanupEntityType;
+
+                var skip = type.IsSystemStateComponent || (removePrefab && type.TypeIndex == m_PrefabType);
+                if (skip)
+                    ++removedTypes;
+                else
+                    types[t - removedTypes] = srcArchetype->Types[t];
+            }
+
+            // Entity has already been destroyed, so it shouldn't be instantiated anymore
+            if (hasCleanup)
+            {
+                return null;
+            }
+            else if (removedTypes > 0)
+            {
+                return GetOrCreateArchetype(types, count - removedTypes);
+            }
+            else
+            {
+                return srcArchetype;
+            }
+        }
+
         // ----------------------------------------------------------------------------------------------------------
         // INTERNAL
         // ----------------------------------------------------------------------------------------------------------
@@ -142,7 +152,7 @@ namespace Unity.Entities
                 for (int i = 0; i < archetype->NumSharedComponents; i++)
                     SharedComponentValues[i] = sharedComponentValues[i];
             }
-            
+
             public ArchetypeChunkFilter(Archetype* archetype, SharedComponentValues sharedComponentValues)
             {
                 Archetype = archetype;
@@ -155,40 +165,40 @@ namespace Unity.Entities
         {
             if (!Exists(entity))
                 return null;
-            
+
             return GetChunkWithEmptySlotsWithAddedComponent(GetChunk(entity), componentType);
         }
-        
-        Chunk* GetChunkWithEmptySlotsWithAddedComponent(Chunk* srcChunk, ComponentType componentType, int sharedComponentIndex=0)
+
+        Chunk* GetChunkWithEmptySlotsWithAddedComponent(Chunk* srcChunk, ComponentType componentType, int sharedComponentIndex = 0)
         {
             var archetypeChunkFilter = GetArchetypeChunkFilterWithAddedComponent(srcChunk, componentType, sharedComponentIndex);
             if (archetypeChunkFilter.Archetype == null)
                 return null;
-            
+
             return GetChunkWithEmptySlots(ref archetypeChunkFilter);
         }
-        
+
         Chunk* GetChunkWithEmptySlotsWithRemovedComponent(Entity entity, ComponentType componentType)
         {
             if (!Exists(entity))
                 return null;
-            
+
             return GetChunkWithEmptySlotsWithRemovedComponent(GetChunk(entity), componentType);
         }
-        
+
         Chunk* GetChunkWithEmptySlotsWithRemovedComponent(Chunk* srcChunk, ComponentType componentType)
         {
             var archetypeChunkFilter = GetArchetypeChunkFilterWithRemovedComponent(srcChunk, componentType);
             if (archetypeChunkFilter.Archetype == null)
                 return null;
-            
+
             return GetChunkWithEmptySlots(ref archetypeChunkFilter);
         }
 
         Chunk* GetChunkWithEmptySlots(ref ArchetypeChunkFilter archetypeChunkFilter)
         {
             var archetype = archetypeChunkFilter.Archetype;
-            fixed (int* sharedComponentValues = archetypeChunkFilter.SharedComponentValues)
+            fixed(int* sharedComponentValues = archetypeChunkFilter.SharedComponentValues)
             {
                 var chunk = archetype->GetExistingChunkWithEmptySlots(sharedComponentValues);
                 if (chunk == null)
@@ -212,7 +222,7 @@ namespace Unity.Entities
             var typeIndex = componentType.TypeIndex;
             var srcArchetype = srcChunk->Archetype;
             var indexInTypeArray = ChunkDataUtility.GetIndexInTypeArray(srcArchetype, typeIndex);
-            
+
             var srcSharedComponentValueArray = srcChunk->SharedComponentValues;
             var sharedComponentOffset = indexInTypeArray - srcArchetype->FirstSharedComponent;
             var srcSharedComponentIndex = srcSharedComponentValueArray[sharedComponentOffset];
@@ -246,7 +256,7 @@ namespace Unity.Entities
 
             return archetypeChunkFilter;
         }
-        
+
         ArchetypeChunkFilter GetArchetypeChunkFilterWithAddedComponent(Chunk* srcChunk, ComponentType componentType, int sharedComponentIndex)
         {
             var srcArchetype = srcChunk->Archetype;
@@ -268,23 +278,21 @@ namespace Unity.Entities
             var srcArchetype = srcChunk->Archetype;
             var srcTypes = srcArchetype->Types;
             var dstTypesCount = srcArchetype->TypesCount + componentTypes.Length;
-            
-            ComponentTypeInArchetype* dstTypes = stackalloc ComponentTypeInArchetype[dstTypesCount];
 
-            var indexOfNewTypeInNewArchetype = stackalloc int[componentTypes.Length];
+            ComponentTypeInArchetype* dstTypes = stackalloc ComponentTypeInArchetype[dstTypesCount];
 
             // zipper the two sorted arrays "type" and "componentTypeInArchetype" into "componentTypeInArchetype"
             // because this is done in-place, it must be done backwards so as not to disturb the existing contents.
 
             var unusedIndices = 0;
             {
-                var oldThings = srcArchetype->TypesCount;
-                var newThings = componentTypes.Length;
-                var mixedThings = oldThings + newThings;
-                while (oldThings > 0 && newThings > 0) // while both are still zippering,
+                var oldThings = srcArchetype->TypesCount - 1;
+                var newThings = componentTypes.Length - 1;
+                var mixedThings = dstTypesCount;
+                while (newThings >= 0) // oldThings[0] has typeIndex 0, newThings can't have anything lower than that
                 {
-                    var oldThing = srcTypes[oldThings - 1];
-                    var newThing = componentTypes.GetComponentType(newThings - 1);
+                    var oldThing = srcTypes[oldThings];
+                    var newThing = componentTypes.GetComponentType(newThings);
                     if (oldThing.TypeIndex > newThing.TypeIndex) // put whichever is bigger at the end of the array
                     {
                         dstTypes[--mixedThings] = oldThing;
@@ -298,24 +306,24 @@ namespace Unity.Entities
                         var componentTypeInArchetype = new ComponentTypeInArchetype(newThing);
                         dstTypes[--mixedThings] = componentTypeInArchetype;
                         --newThings;
-                        indexOfNewTypeInNewArchetype[newThings] = mixedThings; // "this new thing ended up HERE"
                     }
                 }
 
-                Assert.AreEqual(0, newThings); // must not be any new things to copy remaining, oldThings contain entity
-
-                while (oldThings > 0) // if there are remaining old things, copy them here
+                while (oldThings >= 0) // if there are remaining old things, copy them here
                 {
-                    dstTypes[--mixedThings] = srcTypes[--oldThings];
+                    dstTypes[--mixedThings] = srcTypes[oldThings--];
                 }
 
                 unusedIndices = mixedThings; // In case we ignored duplicated types, this will be > 0
             }
 
-            var dstArchetype = GetOrCreateArchetype(dstTypes + unusedIndices, dstTypesCount);
+            if (unusedIndices == componentTypes.Length)
+                return default;
+
+            var dstArchetype = GetOrCreateArchetype(dstTypes + unusedIndices, dstTypesCount - unusedIndices);
             var archetypeChunkFilter = new ArchetypeChunkFilter();
             archetypeChunkFilter.Archetype = dstArchetype;
-            
+
             if (dstArchetype->NumSharedComponents > srcArchetype->NumSharedComponents)
             {
                 BuildSharedComponentIndicesWithAddedComponents(srcArchetype, dstArchetype, srcChunk->SharedComponentValues, archetypeChunkFilter.SharedComponentValues);
@@ -358,12 +366,12 @@ namespace Unity.Entities
 
             return GetArchetypeChunkFilterWithRemovedComponent(srcChunk, dstArchetype, indexInTypeArray, componentType);
         }
-        
+
         static void BuildSharedComponentIndicesWithAddedComponent(int indexOfNewSharedComponent, int value,
             int newCount, SharedComponentValues srcSharedComponentValues, int* dstSharedComponentValues)
         {
             Assert.IsTrue(newCount <= kMaxSharedComponentCount);
-            
+
             srcSharedComponentValues.CopyTo(dstSharedComponentValues, 0, indexOfNewSharedComponent);
             dstSharedComponentValues[indexOfNewSharedComponent] = value;
             srcSharedComponentValues.CopyTo(dstSharedComponentValues + indexOfNewSharedComponent + 1,
@@ -408,7 +416,7 @@ namespace Unity.Entities
 
             int o = 0;
             int n = 0;
-            
+
             for (; n < newCount && o < oldCount;)
             {
                 int srcType = srcArchetype->Types[o + oldFirstShared].TypeIndex;
@@ -420,8 +428,8 @@ namespace Unity.Entities
                 else
                     dstSharedComponentValues[n++] = 0;
             }
-            
-            for (;n < newCount;n++)
+
+            for (; n < newCount; n++)
                 dstSharedComponentValues[n] = 0;
         }
 

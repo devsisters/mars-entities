@@ -1,52 +1,23 @@
 using System;
-using System.Linq;
 using NUnit.Framework;
 using Unity.Collections;
 using Unity.Jobs;
+using Unity.Jobs.LowLevel.Unsafe;
 using UnityEngine.Profiling;
 
-// From nunit docs for SetUpFixture-Attribute
-// "A SetUpFixture outside of any namespace provides SetUp and TearDown for the entire assembly."
-[SetUpFixture]
-public class NUnitAssemblyWideSetupEntitiesTests
-{
-    [OneTimeSetUp]
-    public void Init()
-    {
-        // TODO This breaks specific SubSceneEditorTests. Commenting for now, but the init/shutdown was
-        // fixing undeallocated memory complaints, which need to be addressed.
-        //
-        // Old comment: 
-        // This isn't necessary and is initialized through World.Initialize()->...->EntityManager()->TypeManager.Initialize()
-        // but because we shutdown in tests for explicit cleanup, match it with explicit init here.
-        //Unity.Entities.TypeManager.Initialize();
-
-        NativeLeakDetection.Mode = NativeLeakDetectionMode.EnabledWithStackTrace; // Should have stack trace with tests
-    }
-
-    [OneTimeTearDown]
-    public void Exit()
-    {
-        // TODO This breaks specific SubSceneEditorTests. Commenting for now, but the init/shutdown was
-        // fixing undeallocated memory complaints, which need to be addressed.
-        //
-        // Old comment: 
-        // Avoid a number of memory leak complaints in tests.
-        //Unity.Entities.TypeManager.Shutdown();
-    }
-
-}
+#if !UNITY_DOTSPLAYER_IL2CPP
+using System.Linq;
+#endif
 
 namespace Unity.Entities.Tests
 {
-
 #if NET_DOTS
     public class EmptySystem : ComponentSystem
     {
         protected override void OnUpdate()
         {
-
         }
+
         public new EntityQuery GetEntityQuery(params EntityQueryDesc[] queriesDesc)
         {
             return base.GetEntityQuery(queriesDesc);
@@ -56,11 +27,13 @@ namespace Unity.Entities.Tests
         {
             return base.GetEntityQuery(componentTypes);
         }
+
         public new EntityQuery GetEntityQuery(NativeArray<ComponentType> componentTypes)
         {
             return base.GetEntityQuery(componentTypes);
         }
-        public BufferFromEntity<T> GetBufferFromEntity<T>(bool isReadOnly = false) where T : struct, IBufferElementData
+
+        public new BufferFromEntity<T> GetBufferFromEntity<T>(bool isReadOnly = false) where T : struct, IBufferElementData
         {
             AddReaderWriter(isReadOnly ? ComponentType.ReadOnly<T>() : ComponentType.ReadWrite<T>());
             return EntityManager.GetBufferFromEntity<T>(isReadOnly);
@@ -81,14 +54,15 @@ namespace Unity.Entities.Tests
         {
             return base.GetEntityQuery(componentTypes);
         }
+
         new public EntityQuery GetEntityQuery(NativeArray<ComponentType> componentTypes)
         {
             return base.GetEntityQuery(componentTypes);
         }
     }
-    
+
 #endif
-    
+
     public abstract class ECSTestsFixture
     {
         protected World m_PreviousWorld;
@@ -97,44 +71,34 @@ namespace Unity.Entities.Tests
         protected EntityManager.EntityManagerDebug m_ManagerDebug;
 
         protected int StressTestEntityCount = 1000;
-
+#if !UNITY_DOTSPLAYER
+        private bool JobsDebuggerWasEnabled;
+#endif
         [SetUp]
         public virtual void Setup()
         {
-            // Redirect Log messages in NUnit which get swallowed (from GC invoking destructor in some cases)
-           // System.Console.SetOut(NUnit.Framework.TestContext.Out);
-
             m_PreviousWorld = World.DefaultGameObjectInjectionWorld;
-#if !UNITY_DOTSPLAYER
             World = World.DefaultGameObjectInjectionWorld = new World("Test World");
-#else
-            Unity.Burst.DotsRuntimeInitStatics.Init();
-            World = DefaultTinyWorldInitialization.Initialize("Test World");
-#endif
-
             m_Manager = World.EntityManager;
             m_ManagerDebug = new EntityManager.EntityManagerDebug(m_Manager);
-            
 #if !UNITY_DOTSPLAYER
-#if !UNITY_2019_2_OR_NEWER
-            // Not raising exceptions can easily bring unity down with massive logging when tests fail.
-            // From Unity 2019.2 on this field is always implicitly true and therefore removed.
-
-            UnityEngine.Assertions.Assert.raiseExceptions = true;
-#endif  // #if !UNITY_2019_2_OR_NEWER
-#endif  // #if !UNITY_DOTSPLAYER
+            // Many ECS tests will only pass if the Jobs Debugger enabled;
+            // force it enabled for all tests, and restore the original value at teardown.
+            JobsDebuggerWasEnabled = JobsUtility.JobDebuggerEnabled;
+            JobsUtility.JobDebuggerEnabled = true;
+#endif
         }
 
         [TearDown]
         public virtual void TearDown()
         {
-            if (m_Manager != null && m_Manager.IsCreated)
+            if (World != null && World.IsCreated)
             {
                 // Clean up systems before calling CheckInternalConsistency because we might have filters etc
                 // holding on SharedComponentData making checks fail
-                while (World.Systems.ToArray().Length > 0)
+                while (World.Systems.Count > 0)
                 {
-                    World.DestroySystem(World.Systems.ToArray()[0]);
+                    World.DestroySystem(World.Systems[0]);
                 }
 
                 m_ManagerDebug.CheckInternalConsistency();
@@ -142,21 +106,13 @@ namespace Unity.Entities.Tests
                 World.Dispose();
                 World = null;
 
-             //   World.DefaultGameObjectInjectionWorld = m_PreviousWorld;
-              //  m_PreviousWorld = null;
-             //   m_Manager = null;
-
+                World.DefaultGameObjectInjectionWorld = m_PreviousWorld;
+                m_PreviousWorld = null;
+                m_Manager = default;
             }
-
-#if UNITY_DOTSPLAYER
-            // TODO https://unity3d.atlassian.net/browse/DOTSR-119
-            Unity.Collections.LowLevel.Unsafe.UnsafeUtility.FreeTempMemory();
+#if !UNITY_DOTSPLAYER
+            JobsUtility.JobDebuggerEnabled = JobsDebuggerWasEnabled;
 #endif
-
-            // Restore output
-            var standardOutput = new System.IO.StreamWriter(System.Console.OpenStandardOutput());
-            standardOutput.AutoFlush = true;
-            System.Console.SetOut(standardOutput);
         }
 
         public void AssertDoesNotExist(Entity entity)
@@ -208,40 +164,46 @@ namespace Unity.Entities.Tests
             Assert.AreEqual(m_Manager.GetChunk(e0), m_Manager.GetChunk(e1));
         }
 
-        public void AssertHasVersion<T>(Entity e, uint version) where T :
+        public void AssetHasChangeVersion<T>(Entity e, uint version) where T :
 #if UNITY_DISABLE_MANAGED_COMPONENTS
-            struct, 
+        struct,
 #endif
-            IComponentData
+        IComponentData
         {
             var type = m_Manager.GetArchetypeChunkComponentType<T>(true);
             var chunk = m_Manager.GetChunk(e);
-            Assert.AreEqual(version, chunk.GetComponentVersion(type));
+            Assert.AreEqual(version, chunk.GetChangeVersion(type));
             Assert.IsFalse(chunk.DidChange(type, version));
-            Assert.IsTrue(chunk.DidChange(type, version-1));
+            Assert.IsTrue(chunk.DidChange(type, version - 1));
         }
-        
-        public void AssertHasBufferVersion<T>(Entity e, uint version) where T : struct, IBufferElementData
+
+        public void AssetHasChunkOrderVersion(Entity e, uint version)
+        {
+            var chunk = m_Manager.GetChunk(e);
+            Assert.AreEqual(version, chunk.GetOrderVersion());
+        }
+
+        public void AssetHasBufferChangeVersion<T>(Entity e, uint version) where T : struct, IBufferElementData
         {
             var type = m_Manager.GetArchetypeChunkBufferType<T>(true);
             var chunk = m_Manager.GetChunk(e);
-            Assert.AreEqual(version, chunk.GetComponentVersion(type));
+            Assert.AreEqual(version, chunk.GetChangeVersion(type));
             Assert.IsFalse(chunk.DidChange(type, version));
-            Assert.IsTrue(chunk.DidChange(type, version-1));
+            Assert.IsTrue(chunk.DidChange(type, version - 1));
         }
 
-        public void AssertHasSharedVersion<T>(Entity e, uint version) where T : struct, ISharedComponentData
+        public void AssetHasSharedChangeVersion<T>(Entity e, uint version) where T : struct, ISharedComponentData
         {
             var type = m_Manager.GetArchetypeChunkSharedComponentType<T>();
             var chunk = m_Manager.GetChunk(e);
-            Assert.AreEqual(version, chunk.GetComponentVersion(type));
+            Assert.AreEqual(version, chunk.GetChangeVersion(type));
             Assert.IsFalse(chunk.DidChange(type, version));
-            Assert.IsTrue(chunk.DidChange(type, version-1));
+            Assert.IsTrue(chunk.DidChange(type, version - 1));
         }
 
         class EntityForEachSystem : ComponentSystem
         {
-            protected override void OnUpdate() {  }
+            protected override void OnUpdate() {}
         }
         protected EntityQueryBuilder Entities
         {

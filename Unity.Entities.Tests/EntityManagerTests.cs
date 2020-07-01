@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using Unity.Collections;
 using NUnit.Framework;
+using Unity.Burst;
 
 namespace Unity.Entities.Tests
 {
@@ -84,9 +85,51 @@ namespace Unity.Entities.Tests
             array.Dispose();
         }
 
+        [Test]
+        public void TestIsCreatedProperty()
+        {
+            EntityManager testy;
+            using (var world = new World("Temp"))
+            {
+                testy = world.EntityManager;
+#pragma warning disable 618
+                Assert.IsTrue(testy.IsCreated);
+#pragma warning restore 618
+            }
+#pragma warning disable 618
+            Assert.IsFalse(testy.IsCreated);
+#pragma warning restore 618
+        }
+
+        [Test]
+        public void TestCompareToNullLegacy()
+        {
+#pragma warning disable CS0618 // Type or member is obsolete
+            EntityManager testy = default;
+            Assert.IsTrue(testy == null);
+            using (var world = new World("Temp"))
+            {
+                testy = world.EntityManager;
+                Assert.IsTrue(testy != null);
+            }
+#pragma warning restore CS0618 // Type or member is obsolete
+        }
+
+        [Test]
+        public void TestNullableCompare()
+        {
+#pragma warning disable CS0618 // Type or member is obsolete
+            using (var world = new World("Temp"))
+            {
+                var testy = world?.EntityManager;
+                Assert.IsTrue(testy != null);
+            }
+#pragma warning restore CS0618 // Type or member is obsolete
+        }
+
         unsafe public bool IndexInChunkIsValid(Entity entity)
         {
-            var entityInChunk = m_Manager.EntityComponentStore->GetEntityInChunk(entity);
+            var entityInChunk = m_Manager.GetCheckedEntityDataAccess()->EntityComponentStore->GetEntityInChunk(entity);
             return entityInChunk.IndexInChunk < entityInChunk.Chunk->Count;
         }
 
@@ -96,7 +139,7 @@ namespace Unity.Entities.Tests
             // This test checks for the bug revealed here https://github.com/Unity-Technologies/dots/issues/2133
             // When packing was done, it was possible for the packed entities to have an incorrect
             // EntityInChunk.IndexInChunk.  A catastrophic case was when IndexInChunk was larger than Chunk.Count.
-            var types = new[] {ComponentType.ReadWrite<EcsTestData>()};
+            var types = new[] { ComponentType.ReadWrite<EcsTestData>()};
             var archetype = m_Manager.CreateArchetype(types);
             var entities = new NativeArray<Entity>(2, Allocator.TempJob);
 
@@ -114,6 +157,10 @@ namespace Unity.Entities.Tests
             entities.Dispose();
         }
 
+#if !UNITY_DOTSPLAYER_IL2CPP
+        // https://unity3d.atlassian.net/browse/DOTSR-1432
+        // In IL2CPP this segfaults at runtime. I haven't debugged, but the return type of List<> is suspicious.
+
         [Test]
         public void FoundComponentInterface()
         {
@@ -124,6 +171,21 @@ namespace Unity.Entities.Tests
             var barTypes = m_Manager.GetAssignableComponentTypes(typeof(IEcsNotUsedInterface));
             Assert.AreEqual(0, barTypes.Count);
         }
+
+        [Test]
+        public void FoundComponentInterfaceNonAllocating()
+        {
+            var list = new List<Type>();
+            var fooTypes = m_Manager.GetAssignableComponentTypes(typeof(IEcsFooInterface), list);
+            Assert.AreEqual(1, fooTypes.Count);
+            Assert.AreEqual(typeof(EcsFooTest), fooTypes[0]);
+
+            list.Clear();
+            var barTypes = m_Manager.GetAssignableComponentTypes(typeof(IEcsNotUsedInterface), list);
+            Assert.AreEqual(0, barTypes.Count);
+        }
+
+#endif
 
         [Test]
         public void VersionIsConsistent()
@@ -174,12 +236,12 @@ namespace Unity.Entities.Tests
         }
 
         [Test]
-        [StandaloneFixme]
+        [DotsRuntimeFixme]
         public void GetComponentBoxedSupportsInterface()
         {
             var entity = m_Manager.CreateEntity();
 
-            m_Manager.AddComponentData(entity, new TestInterfaceComponent {Value = 5});
+            m_Manager.AddComponentData(entity, new TestInterfaceComponent { Value = 5});
             var obj = m_Manager.Debug.GetComponentBoxed(entity, typeof(TestInterface));
 
             Assert.AreEqual(typeof(TestInterfaceComponent), obj.GetType());
@@ -187,7 +249,7 @@ namespace Unity.Entities.Tests
         }
 
         [Test]
-        [StandaloneFixme]
+        [DotsRuntimeFixme]
         public void GetComponentBoxedThrowsWhenInterfaceNotFound()
         {
             var entity = m_Manager.CreateEntity();
@@ -266,6 +328,10 @@ namespace Unity.Entities.Tests
         [MaximumChunkCapacity(3)]
         struct MaxCapacityTag3 : IComponentData {}
 
+#if !UNITY_PORTABLE_TEST_RUNNER
+        // https://unity3d.atlassian.net/browse/DOTSR-1432
+        // TODO: IL2CPP_TEST_RUNNER doesn't support TestCase(typeof)
+
         [TestCase(typeof(MaxCapacityTag1))]
         [TestCase(typeof(MaxCapacityTag2))]
         [TestCase(typeof(MaxCapacityTag3))]
@@ -286,6 +352,8 @@ namespace Unity.Entities.Tests
             Assert.True(CollectionHelper.IsAligned(p1, CollectionHelper.CacheLineSize));
             Assert.True(CollectionHelper.IsAligned(p2, CollectionHelper.CacheLineSize));
         }
+
+#endif
 
         struct WillFitWithAlign : IComponentData
         {
@@ -322,11 +390,11 @@ namespace Unity.Entities.Tests
 
             for (int i = 0; i < count; i++)
             {
-                m_Manager.SetComponentData(entities[i], new EcsTestData {value = i});
-                m_Manager.SetComponentData(entities[i], new EcsTestData2 {value0 = 20000 + i, value1 = 40000 + i});
+                m_Manager.SetComponentData(entities[i], new EcsTestData { value = i});
+                m_Manager.SetComponentData(entities[i], new EcsTestData2 { value0 = 20000 + i, value1 = 40000 + i});
                 m_Manager.SetComponentData(entities[i],
-                    new EcsTestData3 {value0 = 50000 + i, value1 = 60000 + i, value2 = 70000 + i});
-                m_Manager.SetComponentData(entities[i], new EcsTestDataEntity {value0 = i, value1 = entities[i]});
+                    new EcsTestData3 { value0 = 50000 + i, value1 = 60000 + i, value2 = 70000 + i});
+                m_Manager.SetComponentData(entities[i], new EcsTestDataEntity { value0 = i, value1 = entities[i] });
                 var buffer = m_Manager.GetBuffer<EcsIntElement>(entities[i]);
                 buffer.Add(new EcsIntElement {Value = i});
             }
@@ -412,8 +480,8 @@ namespace Unity.Entities.Tests
 
             for (int i = 0; i < count; i++)
             {
-                m_Manager.SetComponentData(entities[i], new EcsTestData {value = i});
-                m_Manager.SetComponentData(entities[i], new EcsTestDataEntity {value0 = i, value1 = entities[i]});
+                m_Manager.SetComponentData(entities[i], new EcsTestData { value = i});
+                m_Manager.SetComponentData(entities[i], new EcsTestDataEntity { value0 = i, value1 = entities[i] });
                 var buffer = m_Manager.GetBuffer<EcsIntElement>(entities[i]);
                 buffer.Add(new EcsIntElement {Value = i});
             }
@@ -565,7 +633,6 @@ namespace Unity.Entities.Tests
             m_Manager.Debug.CheckInternalConsistency();
         }
 
-
         [Test]
         [Ignore("Fix had to be reverted, check issue #2996")]
         public void Fix1602()
@@ -583,6 +650,19 @@ namespace Unity.Entities.Tests
             startGroup.Dispose();
             endGroup.Dispose();
         }
+
+#if UNITY_2020_1_OR_NEWER
+        [Test]
+        [DotsRuntimeFixme]
+        public void EntityManager_DoubleDispose_UsesCustomOwnerTypeName()
+        {
+            World tempWorld = new World("TestWorld");
+            var entityManager = tempWorld.EntityManager;
+            tempWorld.Dispose();
+            Assert.That(() => entityManager.DestroyInstance(), Throws.InvalidOperationException.With.Message.Contains("EntityManager"));
+        }
+
+#endif
 
 #if !UNITY_DISABLE_MANAGED_COMPONENTS
         class TestInterfaceManagedComponent : TestInterface, IComponentData
@@ -618,7 +698,7 @@ namespace Unity.Entities.Tests
         }
 
         [Test]
-        [StandaloneFixme]
+        [DotsRuntimeFixme]
         public void GetComponentBoxedSupportsInterface_ManagedComponent()
         {
             var entity = m_Manager.CreateEntity();
@@ -631,7 +711,7 @@ namespace Unity.Entities.Tests
         }
 
         [Test]
-        [StandaloneFixme] // UnsafeUtility.CopyObjectAddressToPtr not implemented
+        [DotsRuntimeFixme] // UnsafeUtility.CopyObjectAddressToPtr not implemented
         public unsafe void ManagedComponents()
         {
             var archetype = m_Manager.CreateArchetype(typeof(EcsTestManagedComponent));
@@ -652,6 +732,8 @@ namespace Unity.Entities.Tests
                     var components = chunk.GetComponentObjects(ManagedComponentType, m_Manager);
                     var entities = chunk.GetNativeArray(entsType);
 
+                    Assert.AreEqual(chunk.Count, components.Length);
+
                     for (var i = 0; i < chunk.Count; ++i)
                     {
                         components[i] = new EcsTestManagedComponent { value = entities[i].Index.ToString() };
@@ -668,6 +750,29 @@ namespace Unity.Entities.Tests
 
             array.Dispose();
             hash.Dispose();
+        }
+
+        [Test]
+        public void GetComponentObjects_ReturnsEmptyArray_IfTypeIsMissing()
+        {
+            var archetype = m_Manager.CreateArchetype(typeof(EcsTestData4), typeof(EcsTestData5));
+            var count = 128;
+            using(var array = new NativeArray<Entity>(count, Allocator.Temp))
+            {
+                m_Manager.CreateEntity(archetype, array);
+
+                var cg = m_Manager.CreateEntityQuery(ComponentType.ReadWrite<EcsTestData4>());
+                using (var chunks = cg.CreateArchetypeChunkArray(Allocator.TempJob))
+                {
+                    var managedComponentType = m_Manager.GetArchetypeChunkComponentType<EcsTestManagedComponent>(false);
+
+                    foreach (var chunk in chunks)
+                    {
+                        var components = chunk.GetComponentObjects(managedComponentType, m_Manager);
+                        Assert.AreEqual(0, components.Length);
+                    }
+                }
+            }
         }
 
         public class ComplexManagedComponent : IComponentData
@@ -689,8 +794,10 @@ namespace Unity.Entities.Tests
             public MyClass Class;
         }
 
+        // https://unity3d.atlassian.net/browse/DOTSR-1432
+        // TODO the il2cpp test runner doesn't Assert.AreSame/AreNotSame
         [Test]
-        [StandaloneFixme] // Unity.Properties support
+        [DotsRuntimeFixme] // Unity.Properties support
         public void Instantiate_DeepClone_ManagedComponents()
         {
             var entity = m_Manager.CreateEntity();
@@ -733,47 +840,53 @@ namespace Unity.Entities.Tests
             Assert.AreEqual(1, instanceComponent.List.Count);
             Assert.AreEqual("SomeListData", instanceComponent.List[0].data);
             ValidateInstance(instanceComponent);
-            
+
             Assert.AreSame(m_Manager.GetComponentData<ComplexManagedComponent>(entity), originalManagedComponent);
             Assert.AreNotSame(instanceComponent, originalManagedComponent);
         }
-        
+
         class ManagedComponentWithArray : IComponentData
         {
             public int[] IntArray;
         }
 
+#if !UNITY_PORTABLE_TEST_RUNNER
+        // https://unity3d.atlassian.net/browse/DOTSR-1432
+        // TODO: IL2CPP_TEST_RUNNER doesn't broadly support the That / Constraint Model. Note this test case is also flagged DotsRuntimeFixme.
+
         [Test]
-        [StandaloneFixme] // Requires Unity.Properties support
+        [DotsRuntimeFixme] // Requires Unity.Properties support
         public void Instantiate_DeepClone_ManagedComponentWithZeroSizedArray()
         {
             var originalEntity = m_Manager.CreateEntity();
             var originalComponent = new ManagedComponentWithArray { IntArray = new int[0] };
-            
+
             m_Manager.AddComponentData(originalEntity, originalComponent);
-            
+
             var instance = m_Manager.Instantiate(originalEntity);
             var instanceComponent = m_Manager.GetComponentData<ManagedComponentWithArray>(instance);
 
             Assert.That(originalComponent.IntArray, Is.Not.SameAs(instanceComponent.IntArray));
             Assert.That(instanceComponent.IntArray.Length, Is.EqualTo(0));
         }
-        
+
         [Test]
-        [StandaloneFixme] // Requires Unity.Properties support
+        [DotsRuntimeFixme] // Requires Unity.Properties support
         public void Instantiate_DeepClone_ManagedComponentWithNullArray()
         {
             var originalEntity = m_Manager.CreateEntity();
             var originalComponent = new ManagedComponentWithArray { IntArray = null };
-            
+
             m_Manager.AddComponentData(originalEntity, originalComponent);
-            
+
             var instance = m_Manager.Instantiate(originalEntity);
             var instanceComponent = m_Manager.GetComponentData<ManagedComponentWithArray>(instance);
 
             Assert.That(instanceComponent.IntArray, Is.Null);
         }
-        
+
+#endif // UNITY_PORTABLE_TEST_RUNNER
+
         class ManagedComponentWithNestedClass : IComponentData
         {
 #pragma warning disable 649
@@ -781,26 +894,29 @@ namespace Unity.Entities.Tests
             {
                 public float x;
             }
-            
+
             public NestedClass Nested;
         }
 #pragma warning restore 649
-        
+
+#if !UNITY_PORTABLE_TEST_RUNNER
+        // https://unity3d.atlassian.net/browse/DOTSR-1432
+        // TODO: IL2CPP_TEST_RUNNER doesn't broadly support the That / Constraint Model. Note this is also flagged DotsRuntimeFixme.
         [Test]
-        [StandaloneFixme] // Requires Unity.Properties support
+        [DotsRuntimeFixme] // Requires Unity.Properties support
         public void Instantiate_DeepClone_ManagedComponentWithNullReferenceType()
         {
             var originalEntity = m_Manager.CreateEntity();
             var originalComponent = new ManagedComponentWithNestedClass { Nested = null };
-            
+
             m_Manager.AddComponentData(originalEntity, originalComponent);
-            
+
             var instance = m_Manager.Instantiate(originalEntity);
             var instanceComponent = m_Manager.GetComponentData<ManagedComponentWithNestedClass>(instance);
 
             Assert.That(instanceComponent.Nested, Is.Null);
         }
-        
+
         [Test]
         public void AddComponentKeepsObjectReference()
         {
@@ -811,6 +927,46 @@ namespace Unity.Entities.Tests
             m_Manager.AddComponentData(entity, new ComplexManagedComponent());
             Assert.AreSame(m_Manager.GetComponentData<EcsTestManagedComponent>(entity), obj);
         }
+
+        [Test]
+        public void ManagedAddComponentDefaultsToNull()
+        {
+            var entity = m_Manager.CreateEntity();
+            m_Manager.AddComponent<EcsTestManagedComponent>(entity);
+            Assert.AreEqual(null, m_Manager.GetComponentData<EcsTestManagedComponent>(entity));
+
+            m_Manager.RemoveComponent<EcsTestManagedComponent>(entity);
+            Assert.IsFalse(m_Manager.HasComponent<EcsTestManagedComponent>(entity));
+        }
+
+        [Test]
+        public void AddComponentWithExplicitNull()
+        {
+            var entity = m_Manager.CreateEntity();
+            m_Manager.AddComponentData<EcsTestManagedComponent>(entity, null);
+            Assert.AreEqual(null, m_Manager.GetComponentData<EcsTestManagedComponent>(entity));
+        }
+
+        [Test]
+        public void SetManagedComponentDataToNull()
+        {
+            var entity = m_Manager.CreateEntity();
+            m_Manager.AddComponentData<EcsTestManagedComponent>(entity, new EcsTestManagedComponent());
+            m_Manager.SetComponentData<EcsTestManagedComponent>(entity, null);
+            Assert.AreEqual(null, m_Manager.GetComponentData<EcsTestManagedComponent>(entity));
+        }
+
+        [Test]
+        public void AddMismatchedManagdComponentThrows()
+        {
+            var entity = m_Manager.CreateEntity();
+            Assert.Throws<ArgumentException>(() =>
+            {
+                m_Manager.AddComponentData<EcsTestManagedComponent>(entity, new EcsTestManagedComponent2());
+            });
+        }
+
+#endif // UNITY_PORTABLE_TEST_RUNNER
 #endif
     }
 }

@@ -14,16 +14,27 @@ namespace Unity.Entities
     [AddComponentMenu("")]
     public class GameObjectEntity : MonoBehaviour
     {
-        public EntityManager EntityManager
+        public World World
         {
             get
             {
                 if (enabled && gameObject.activeInHierarchy)
                     ReInitializeEntityManagerAndEntityIfNecessary();
-                return m_EntityManager;
+                return m_World;
             }
         }
-        EntityManager m_EntityManager;
+
+        private World m_World;
+
+        public EntityManager EntityManager
+        {
+            get
+            {
+                World w = World;
+                if (w != null && w.IsCreated) return w.EntityManager;
+                else return default;
+            }
+        }
 
         public Entity Entity
         {
@@ -39,37 +50,18 @@ namespace Unity.Entities
         void ReInitializeEntityManagerAndEntityIfNecessary()
         {
             // in case e.g., on a prefab that was open for edit when domain was unloaded
-            // existing m_EntityManager lost all its data, so simply create a new one
-            if (m_EntityManager != null && !m_EntityManager.IsCreated && !m_Entity.Equals(default))
+            // existing EntityManager lost all its data, so simply create a new one
+            if (m_World != null && !m_World.IsCreated && !m_Entity.Equals(default))
                 Initialize();
         }
+
+        static List<Component> s_ComponentsCache = new List<Component>();
 
         // TODO: Very wrong error messages when creating entity with empty ComponentType array?
         public static Entity AddToEntityManager(EntityManager entityManager, GameObject gameObject)
         {
-            GetComponents(gameObject, true, out var types, out var components);
-
-            EntityArchetype archetype;
-            try
-            {
-                archetype = entityManager.CreateArchetype(types);
-            }
-            catch (Exception)
-            {
-                for (int i = 0; i < types.Length; ++i)
-                {
-                    if (Array.IndexOf(types, types[i]) != i)
-                    {
-                        Debug.LogWarning($"GameObject '{gameObject}' has multiple {types[i]} components and cannot be converted, skipping.");
-                        return Entity.Null;
-                    }
-                }
-
-                throw;
-            }
-
-            var entity = CreateEntity(entityManager, archetype, components, types);
-
+            var entity = GameObjectConversionMappingSystem.CreateGameObjectEntity(entityManager, gameObject, s_ComponentsCache);
+            s_ComponentsCache.Clear();
             return entity;
         }
 
@@ -78,6 +70,7 @@ namespace Unity.Entities
         {
             var components = gameObject.GetComponents<Component>();
 
+#pragma warning disable 618 // remove once ComponentDataProxyBase is removed
             for (var i = 0; i != components.Length; i++)
             {
                 var component = components[i];
@@ -86,70 +79,7 @@ namespace Unity.Entities
 
                 entityManager.AddComponentObject(entity, component);
             }
-        }
-
-        static void GetComponents(GameObject gameObject, bool includeGameObjectComponents, out ComponentType[] types, out Component[] components)
-        {            
-            components = gameObject.GetComponents<Component>();
-
-            var componentCount = 0;
-            for (var i = 0; i != components.Length; i++)
-            {
-                var component = components[i];
-                if (component == null)
-                {
-                    UnityEngine.Debug.LogWarning($"The referenced script is missing on {gameObject.name}", gameObject);
-                    continue;
-                }
-
-                if (component is ComponentDataProxyBase)
-                    componentCount++;
-                else if (includeGameObjectComponents && !(component is GameObjectEntity) && !component.IsComponentDisabled())
-                    componentCount++;
-                else
-                    components[i] = null;
-            }
-
-            types = new ComponentType[componentCount];
-
-            var t = 0;
-            for (var i = 0; i != components.Length; i++)
-            {
-                var component = components[i];
-                if (component == null)
-                    continue;
-
-                if (component is ComponentDataProxyBase proxy)
-                    types[t++] = proxy.GetComponentType();
-                else
-                    types[t++] = component.GetType();
-            }
-
-            Assert.AreEqual(t, types.Length);
-        }
-
-        static Entity CreateEntity(EntityManager entityManager, EntityArchetype archetype, IReadOnlyList<Component> components, IReadOnlyList<ComponentType> types)
-        {
-            var entity = entityManager.CreateEntity(archetype);
-            var t = 0;
-            for (var i = 0; i != components.Count; i++)
-            {
-                var component = components[i];
-                if (component == null)
-                    continue;
-
-                if (component is ComponentDataProxyBase proxy)
-                {
-                    proxy.UpdateComponentData(entityManager, entity);
-                    t++;
-                }
-                else
-                {
-                    entityManager.SetComponentObject(entity, types[t], component);
-                    t++;
-                }
-            }
-            return entity;
+#pragma warning restore 618
         }
 
         void Initialize()
@@ -157,8 +87,8 @@ namespace Unity.Entities
             DefaultWorldInitialization.DefaultLazyEditModeInitialize();
             if (World.DefaultGameObjectInjectionWorld != null)
             {
-                m_EntityManager = World.DefaultGameObjectInjectionWorld.EntityManager;
-                m_Entity = AddToEntityManager(m_EntityManager, gameObject);
+                m_World = World.DefaultGameObjectInjectionWorld;
+                m_Entity = AddToEntityManager(m_World.EntityManager, gameObject);
             }
         }
 
@@ -169,22 +99,27 @@ namespace Unity.Entities
 
         protected virtual void OnDisable()
         {
-            if (EntityManager != null && EntityManager.IsCreated && EntityManager.Exists(Entity))
-                EntityManager.DestroyEntity(Entity);
+            if (m_World != null && m_World.IsCreated)
+            {
+                var em = m_World.EntityManager;
+                if (em.Exists(Entity))
+                    em.DestroyEntity(Entity);
+            }
 
-            m_EntityManager = null;
+            m_World = null;
             m_Entity = Entity.Null;
         }
 
         public static void CopyAllComponentsToEntity(GameObject gameObject, EntityManager entityManager, Entity entity)
         {
+#pragma warning disable 618 // remove once ComponentDataProxyBase is removed
             foreach (var proxy in gameObject.GetComponents<ComponentDataProxyBase>())
             {
-                // TODO: handle shared components and tag components
                 var type = proxy.GetComponentType();
                 entityManager.AddComponent(entity, type);
                 proxy.UpdateComponentData(entityManager, entity);
             }
+#pragma warning restore 618
         }
     }
 }

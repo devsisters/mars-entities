@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using Unity.Entities;
@@ -32,8 +32,8 @@ namespace Unity.Scenes.Editor
 
         void OnUndoRedoPerformed()
         {
-            // The referenced Scene Asset can have changed when undo/redo happens so we ensure to 
-            // reload the Hierarchy which depends on the current SubScene state. 
+            // The referenced Scene Asset can have changed when undo/redo happens so we ensure to
+            // reload the Hierarchy which depends on the current SubScene state.
             SceneHierarchyHooks.ReloadAllSceneHierarchies();
         }
 
@@ -61,6 +61,28 @@ namespace Unity.Scenes.Editor
                 var prevSceneAsset = m_PreviousSceneAssets[i];
                 if (prevSceneAsset != subScene.SceneAsset)
                 {
+                    if (!needsHierarchyReload)
+                    {
+                        // First time we see there's a change in Scene Asset,
+                        // check if new scene is already loaded but not as a Sub Scene.
+                        var scene = subScene.EditingScene;
+                        if (scene.IsValid() && !scene.isSubScene)
+                        {
+                            if (EditorUtility.DisplayDialog("Convert to Sub Scene?", "The Scene is already loaded as a root Scene. Do you want to convert it to a Sub Scene?", "Convert", "Cancel"))
+                            {
+                                // Make loaded scene a Sub Scene. Only needs to be done once,
+                                // since even with multi-editing, user can only have assigned one Scene.
+                                scene.isSubScene = true;
+                            }
+                            else
+                            {
+                                // Cancel assigning new Scene Asset (after the fact).
+                                Undo.PerformUndo();
+                                break;
+                            }
+                        }
+                    }
+
                     needsHierarchyReload = true;
                     if (prevSceneAsset != null)
                     {
@@ -84,11 +106,14 @@ namespace Unity.Scenes.Editor
         public override void OnInspectorGUI()
         {
             var subScene = target as SubScene;
-            
-            var isNestedSubScene = subScene.gameObject.scene.isSubScene;
-            if (isNestedSubScene)
+
+            if (!subScene.IsInMainStage())
             {
-                EditorGUILayout.HelpBox($"Nesting SubScenes are not supported yet.", MessageType.Warning, true);
+                // In Prefab Mode and when selecting a Prefab Asset in the Project Browser we only show the inspector of data of the
+                // SubScene, and not the load/unload/edit/close buttons.
+                base.OnInspectorGUI();
+
+                EditorGUILayout.HelpBox($"Only Sub Scenes in the Main Stage can be loaded and unloaded.", MessageType.Info, true);
                 EditorGUILayout.Space();
                 return;
             }
@@ -124,20 +149,20 @@ namespace Unity.Scenes.Editor
                     SubSceneInspectorUtility.CloseAndAskSaveIfUserWantsTo(subscenes);
                 }
             }
-    
+
             GUI.enabled = SubSceneInspectorUtility.IsDirty(subscenes);
             if (GUILayout.Button("Save"))
             {
                 SubSceneInspectorUtility.SaveScene(subscenes);
             }
             GUI.enabled = true;
-    
+
             GUILayout.EndHorizontal();
-            
+
             var scenes = SubSceneInspectorUtility.GetLoadableScenes(subscenes);
 
             GUILayout.Space(10);
-            
+
             if (World.DefaultGameObjectInjectionWorld != null)
             {
                 var entityManager = World.DefaultGameObjectInjectionWorld.EntityManager;
@@ -163,27 +188,26 @@ namespace Unity.Scenes.Editor
                 }
             }
 
-
     #if false
             // @TODO: TEMP for debugging
             if (GUILayout.Button("ClearWorld"))
             {
                 World.DisposeAllWorlds();
                 DefaultWorldInitialization.Initialize("Default World", !Application.isPlaying);
-    
+
                 var scenes = FindObjectsOfType<SubScene>();
                 foreach (var scene in scenes)
                 {
-                    var oldEnabled = scene.enabled; 
+                    var oldEnabled = scene.enabled;
                     scene.enabled = false;
                     scene.enabled = oldEnabled;
                 }
-                
+
                 EditorUpdateUtility.EditModeQueuePlayerLoopUpdate();
             }
     #endif
 
-            bool hasDuplicates = subScene.SceneAsset != null && (SubScene.AllSubScenes.Count(s => s.SceneAsset == subScene.SceneAsset) > 1);
+            bool hasDuplicates = subScene.SceneAsset != null && (SubScene.AllSubScenes.Count(s => (s.SceneAsset == subScene.SceneAsset)) > 1);
             if (hasDuplicates)
             {
                 EditorGUILayout.HelpBox($"The Scene Asset '{subScene.EditableScenePath}' is used mutiple times and this is not supported. Clear the reference.", MessageType.Warning, true);
@@ -215,11 +239,21 @@ namespace Unity.Scenes.Editor
                 EditorGUILayout.HelpBox($"SubScenes can not have child game objects. Close the scene and delete the child game objects.", MessageType.Warning, true);
             }
 
+            GUILayout.Space(10);
             if (CheckConversionLog(subScene))
             {
-                GUILayout.Space(10);
                 GUILayout.Label("Importing...");
                 Repaint();
+            }
+            else
+            {
+                if (!SubSceneInspectorUtility.IsEditingAll(subscenes))
+                {
+                    if (GUILayout.Button("Reimport"))
+                    {
+                        SubSceneInspectorUtility.ForceReimport(subscenes);
+                    }
+                }
             }
             if (m_ConversionLog.Length != 0)
             {
@@ -239,42 +273,42 @@ namespace Unity.Scenes.Editor
 
         Bounds OnGetFrameBounds()
         {
-            AABB aabb = SubSceneInspectorUtility.GetActiveWorldMinMax(World.DefaultGameObjectInjectionWorld, targets); 
+            AABB aabb = SubSceneInspectorUtility.GetActiveWorldMinMax(World.DefaultGameObjectInjectionWorld, targets);
             return new Bounds(aabb.Center, aabb.Size);
         }
-        
+
         // Visualize SubScene using bounding volume when it is selected.
         [DrawGizmo(GizmoType.Selected)]
         static void DrawSubsceneBounds(SubScene scene, GizmoType gizmoType)
         {
             SubSceneInspectorUtility.DrawSubsceneBounds(scene);
         }
-        
+
         bool CheckConversionLog(SubScene subScene)
         {
             var pendingWork = false;
 
-            foreach (var world in World.AllWorlds)
+            foreach (var world in World.All)
             {
                 var sceneSystem = world.GetExistingSystem<SceneSystem>();
                 if (sceneSystem is null)
                     continue;
 
-                if (!m_ConversionLogLoaded.TryGetValue(sceneSystem.BuildSettingsGUID, out var loaded))
-                    m_ConversionLogLoaded.Add(sceneSystem.BuildSettingsGUID, false);
+                if (!m_ConversionLogLoaded.TryGetValue(sceneSystem.BuildConfigurationGUID, out var loaded))
+                    m_ConversionLogLoaded.Add(sceneSystem.BuildConfigurationGUID, false);
                 else if (loaded)
                     continue;
 
-                var hash = EntityScenesPaths.GetSubSceneArtifactHash(subScene.SceneGUID, sceneSystem.BuildSettingsGUID, UnityEditor.Experimental.AssetDatabaseExperimental.ImportSyncMode.Queue);
+                var hash = EntityScenesPaths.GetSubSceneArtifactHash(subScene.SceneGUID, sceneSystem.BuildConfigurationGUID, ImportMode.Asynchronous);
                 if (!hash.IsValid)
                 {
                     pendingWork = true;
                     continue;
                 }
 
-                m_ConversionLogLoaded[sceneSystem.BuildSettingsGUID] = true;
+                m_ConversionLogLoaded[sceneSystem.BuildConfigurationGUID] = true;
 
-                UnityEditor.Experimental.AssetDatabaseExperimental.GetArtifactPaths(hash, out var paths);
+                AssetDatabaseCompatibility.GetArtifactPaths(hash, out var paths);
                 var logPath = EntityScenesPaths.GetLoadPathFromArtifactPaths(paths, EntityScenesPaths.PathType.EntitiesConversionLog);
                 if (logPath == null)
                     continue;

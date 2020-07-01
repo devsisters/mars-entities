@@ -40,6 +40,21 @@ namespace Unity.Entities.Tests.Conversion
         }
 
         [Test]
+        public void ConversionOfInactiveStaticGameObject()
+        {
+            var gameObject = CreateGameObject("", typeof(StaticOptimizeEntity));
+            var child = CreateGameObject("");
+            child.transform.parent = gameObject.transform;
+
+            gameObject.SetActive(false);
+            var entity = ConvertGameObjectHierarchy(gameObject, MakeDefaultSettings());
+
+            EntitiesAssert.ContainsOnly(m_Manager,
+                EntityMatch.Exact<Disabled, Static, LocalToWorld, LinkedEntityGroup>(entity),
+                EntityMatch.Exact<Disabled, Static, LocalToWorld>());
+        }
+
+        [Test]
         public void ConversionOfComponentDataProxy()
         {
             var gameObject = CreateGameObject();
@@ -48,7 +63,7 @@ namespace Unity.Entities.Tests.Conversion
             var entity = ConvertGameObjectHierarchy(gameObject, MakeDefaultSettings());
 
             EntitiesAssert.ContainsOnly(m_Manager,
-                // this is the converted gameobject we created above 
+                // this is the converted gameobject we created above
                 EntityMatch.Exact(entity, new EcsTestData(5), k_RootComponents),
                 // ComponentDataProxyBase requires GameObjectEntity which creates this redundant Entity into the destination world from its OnEnable
                 // TODO: is this ^^ behavior right?
@@ -59,7 +74,7 @@ namespace Unity.Entities.Tests.Conversion
         public void ConversionOfPrefabIsEntityPrefab()
         {
             var entity = ConvertGameObjectHierarchy(LoadPrefab("Prefab"), MakeDefaultSettings());
-            
+
             EntitiesAssert.ContainsOnly(m_Manager,
                 EntityMatch.Exact<Prefab, MockData>(entity, k_RootComponents));
         }
@@ -71,7 +86,7 @@ namespace Unity.Entities.Tests.Conversion
             go.AddComponent<EntityRefTestDataAuthoring>();
 
             var entity = ConvertGameObjectHierarchy(go, MakeDefaultSettings());
-            
+
             EntitiesAssert.ContainsOnly(m_Manager,
                 EntityMatch.Exact<LocalToWorld, Translation, Rotation, LinkedEntityGroup>(entity, new EntityRefTestData()));
         }
@@ -85,7 +100,7 @@ namespace Unity.Entities.Tests.Conversion
             var entity = ConvertGameObjectHierarchy(go, MakeDefaultSettings());
             var referenced = m_Manager.GetComponentData<EntityRefTestData>(entity).Value;
             var referenced2 = m_Manager.GetComponentData<EntityRefTestData>(referenced).Value;
-            
+
             EntitiesAssert.ContainsOnly(m_Manager,
                 // gameobject created above
                 EntityMatch.Exact<EntityRefTestData>(entity, k_RootComponents),
@@ -151,20 +166,39 @@ namespace Unity.Entities.Tests.Conversion
             EntitiesAssert.ContainsOnly(m_Manager,
                 EntityMatch.Exact<Prefab>(new MockData(100), k_RootComponents, entity),
                 EntityMatch.Exact<Prefab>(new MockData(101), k_ChildComponents),
-                EntityMatch.Exact        (new MockData(100), k_RootComponents, instance),
-                EntityMatch.Exact        (new MockData(101), k_ChildComponents));
-            
+                EntityMatch.Exact(new MockData(100), k_RootComponents, instance),
+                EntityMatch.Exact(new MockData(101), k_ChildComponents));
+
             m_Manager.SetEnabled(instance, false);
-            
+
             EntitiesAssert.Contains(m_Manager,
                 EntityMatch.Exact<Disabled, MockData>(k_RootComponents, instance),
                 EntityMatch.Exact<Disabled, MockData>(k_ChildComponents));
 
             m_Manager.SetEnabled(instance, true);
-            
+
             EntitiesAssert.Contains(m_Manager,
                 EntityMatch.Exact<MockData>(k_RootComponents, instance),
                 EntityMatch.Exact<MockData>(k_ChildComponents));
+        }
+
+        [Test]
+        public void DestroyEntity_WithInstantiatedPrefabHierarchy_DestroysEntireHierarchy()
+        {
+            var entity = ConvertGameObjectHierarchy(LoadPrefab("Prefab_Hierarchy"), MakeDefaultSettings());
+            var instance = m_Manager.Instantiate(entity);
+
+            EntitiesAssert.ContainsOnly(m_Manager,
+                EntityMatch.Exact<Prefab>(new MockData(100), k_RootComponents, entity),
+                EntityMatch.Exact<Prefab>(new MockData(101), k_ChildComponents),
+                EntityMatch.Exact(new MockData(100), k_RootComponents, instance),
+                EntityMatch.Exact(new MockData(101), k_ChildComponents));
+
+            m_Manager.DestroyEntity(instance);
+
+            EntitiesAssert.ContainsOnly(m_Manager,
+                EntityMatch.Exact<Prefab>(new MockData(100), k_RootComponents, entity),
+                EntityMatch.Exact<Prefab>(new MockData(101), k_ChildComponents));
         }
 
         [Test]
@@ -185,7 +219,7 @@ namespace Unity.Entities.Tests.Conversion
             EntitiesAssert.ContainsOnly(m_Manager,
                 EntityMatch.Exact<EntityRefTestData, LinkedEntityGroup>(k_CommonComponents, entity),
                 EntityMatch.Exact<Disabled,          LinkedEntityGroup>(k_ChildComponents, childEntity),
-                EntityMatch.Exact<Disabled>                            (k_ChildComponents));
+                EntityMatch.Exact<Disabled>(k_ChildComponents));
 
             // Conversion will automatically add a LinkedEntityGroup to all inactive children
             // so that when enabling them, the whole hierarchy will get enabled
@@ -193,8 +227,8 @@ namespace Unity.Entities.Tests.Conversion
 
             EntitiesAssert.ContainsOnly(m_Manager,
                 EntityMatch.Exact<EntityRefTestData, LinkedEntityGroup>(k_CommonComponents, entity),
-                EntityMatch.Exact<                   LinkedEntityGroup>(k_ChildComponents, childEntity),
-                EntityMatch.Exact                                      (k_ChildComponents));
+                EntityMatch.Exact<LinkedEntityGroup>(k_ChildComponents, childEntity),
+                EntityMatch.Exact(k_ChildComponents));
         }
 
         [Test]
@@ -210,7 +244,7 @@ namespace Unity.Entities.Tests.Conversion
             EntitiesAssert.ContainsOnly(m_Manager,
                 EntityMatch.Exact<Disabled>(entity, k_RootComponents),
                 EntityMatch.Exact<Disabled>(k_ChildComponents));
-            
+
             Assert.That(Entities.WithAll<Translation>().ToEntityQuery().CalculateEntityCount(), Is.Zero);
         }
 
@@ -218,15 +252,17 @@ namespace Unity.Entities.Tests.Conversion
         public void DisabledBehaviourStripping()
         {
             var gameObject = new GameObject();
+#pragma warning disable 618 // remove once ComponentDataProxyBase is removed
             gameObject.AddComponent<MockDataProxy>().enabled = false;
+#pragma warning restore 618
             gameObject.AddComponent<EntityRefTestDataAuthoring>().enabled = false;
 
             var strippedEntity = ConvertGameObjectHierarchy(gameObject, MakeDefaultSettings());
-            
+
             EntitiesAssert.ContainsOnly(m_Manager,
                 EntityMatch.Exact(strippedEntity, k_RootComponents),
                 EntityMatch.Exact<Transform>());
-            
+
             UnityObject.DestroyImmediate(gameObject);
 
             EntitiesAssert.ContainsOnly(m_Manager,
@@ -241,11 +277,53 @@ namespace Unity.Entities.Tests.Conversion
             gameObject.AddComponent<EntityRefTestDataAuthoring>();
             gameObject.AddComponent<EntityRefTestDataAuthoring>();
 
-            Assert.DoesNotThrow(() => ConvertGameObjectHierarchy(gameObject, MakeDefaultSettings()));
+            var convertedEntity = ConvertGameObjectHierarchy(gameObject, MakeDefaultSettings());
 
-            LogAssert.Expect(LogType.Warning, new Regex(@"Missing entity for root GameObject"));
+            EntitiesAssert.ContainsOnly(m_Manager,
+                EntityMatch.Exact<EntityRefTestData>(convertedEntity, k_RootComponents));
+        }
 
-            EntitiesAssert.IsEmpty(m_Manager);
+        [UpdateInGroup(typeof(GameObjectAfterConversionGroup))]
+        internal class TestConversionCleanup : GameObjectConversionSystem
+        {
+            protected override void OnUpdate()
+            {
+                Entities.ForEach((Transform transform) =>
+                {
+                    var entity = GetPrimaryEntity(transform);
+                    if (DstEntityManager.HasComponent<Parent>(entity))
+                        DstEntityManager.DestroyEntity(entity);
+                });
+            }
+        }
+
+        [Test]
+        public void DeletingEntitiesOfConvertedPrefab_DoesNotThrow()
+        {
+            var prefabEntity = Entity.Null;
+
+            var settings = MakeDefaultSettings();
+
+            settings.ConversionWorldCreated = CreateSystem;
+            settings.ConversionWorldPreDispose = DestroySystem;
+
+            Assert.DoesNotThrow(() => prefabEntity = ConvertGameObjectHierarchy(LoadPrefab("Prefab_Hierarchy"), settings));
+
+            Assert.DoesNotThrow(() => m_Manager.Instantiate(prefabEntity));
+
+            void CreateSystem(World world)
+            {
+                var gameObjectAfterConversionGroup = world.GetExistingSystem<GameObjectAfterConversionGroup>();
+                var testConversionCleanup = world.GetOrCreateSystem<TestConversionCleanup>();
+
+                gameObjectAfterConversionGroup.AddSystemToUpdateList(testConversionCleanup);
+            }
+
+            void DestroySystem(World world)
+            {
+                var testConversionCleanup = world.GetOrCreateSystem<TestConversionCleanup>();
+                world.DestroySystem(testConversionCleanup);
+            }
         }
     }
 }

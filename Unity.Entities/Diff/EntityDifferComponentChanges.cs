@@ -11,7 +11,7 @@ using Unity.Properties;
 namespace Unity.Entities
 {
     static unsafe partial class EntityDiffer
-    {        
+    {
         struct DeferredSharedComponentChange
         {
             public EntityGuid EntityGuid;
@@ -24,12 +24,8 @@ namespace Unity.Entities
         {
             public EntityGuid EntityGuid;
             public int TypeIndex;
-            public int AfterTypeIndex;
-            public Chunk* AfterChunk;
-            public int AfterEntityIndex;
-            public int BeforeTypeIndex;
-            public Chunk* BeforeChunk;
-            public int BeforeEntityIndex;
+            public int AfterManagedComponentIndex;
+            public int BeforeManagedComponentIndex;
         }
 
         readonly struct ComponentChanges : IDisposable
@@ -46,9 +42,9 @@ namespace Unity.Entities
             public readonly NativeList<byte> ComponentData;
             public readonly NativeList<DeferredSharedComponentChange> SharedComponentChanges;
             public readonly NativeList<DeferredManagedComponentChange> ManagedComponentChanges;
-            
+
             public readonly bool IsCreated;
-            
+
             public ComponentChanges(Allocator allocator)
             {
                 Entities = new PackedCollection<EntityGuid>(1, allocator);
@@ -141,7 +137,7 @@ namespace Unity.Entities
             [WriteOnly] public NativeList<byte> ComponentData;
             [WriteOnly] public NativeList<DeferredSharedComponentChange> SharedComponentChanges;
             [WriteOnly] public NativeList<DeferredManagedComponentChange> ManagedComponentChanges;
-                
+
             [NativeDisableContainerSafetyRestriction] public NativeHashMap<BlobAssetReferencePtr, BlobAssetPtr> AfterBlobAssetRemap;
             [NativeDisableContainerSafetyRestriction] public NativeHashMap<BlobAssetReferencePtr, BlobAssetPtr> BeforeBlobAssetRemap;
 
@@ -161,7 +157,7 @@ namespace Unity.Entities
 
                         if (afterTypeInArchetype.IsSystemStateComponent)
                             continue;
-                        
+
                         AddComponentData(
                             afterChunk,
                             afterArchetype,
@@ -278,7 +274,8 @@ namespace Unity.Entities
 
                 if (afterTypeInArchetype.IsManagedComponent)
                 {
-                    AppendManagedComponentData(entityGuid, afterTypeInArchetype.TypeIndex, afterIndexInTypeArray, afterChunk, afterEntityIndexInChunk);
+                    var afterManagedComponentIndex  = ((int*)(ChunkDataUtility.GetChunkBuffer(afterChunk) + afterArchetype->Offsets[afterIndexInTypeArray]))[afterEntityIndexInChunk];
+                    AppendManagedComponentData(entityGuid, afterTypeInArchetype.TypeIndex, afterManagedComponentIndex);
                     return;
                 }
 
@@ -292,7 +289,7 @@ namespace Unity.Entities
                 if (afterTypeInArchetype.IsBuffer)
                 {
                     var sizeOf = afterArchetype->SizeOfs[afterIndexInTypeArray];
-                    var buffer = (BufferHeader*)(GetChunkBuffer(afterChunk) + afterArchetype->Offsets[afterIndexInTypeArray] + afterEntityIndexInChunk * sizeOf);
+                    var buffer = (BufferHeader*)(ChunkDataUtility.GetChunkBuffer(afterChunk) + afterArchetype->Offsets[afterIndexInTypeArray] + afterEntityIndexInChunk * sizeOf);
                     var length = buffer->Length;
 
                     if (length == 0)
@@ -333,7 +330,7 @@ namespace Unity.Entities
                 {
                     var typeInfo = TypeInfo[afterTypeInArchetype.TypeIndex & TypeManager.ClearFlagsMask];
                     var sizeOf = afterArchetype->SizeOfs[afterIndexInTypeArray];
-                    var ptr = GetChunkBuffer(afterChunk) + afterArchetype->Offsets[afterIndexInTypeArray] + afterEntityIndexInChunk * sizeOf;
+                    var ptr = ChunkDataUtility.GetChunkBuffer(afterChunk) + afterArchetype->Offsets[afterIndexInTypeArray] + afterEntityIndexInChunk * sizeOf;
                     AppendComponentData(packedComponent, ptr, sizeOf);
                     ExtractPatches(typeInfo, packedComponent, ptr, 1);
                 }
@@ -366,8 +363,10 @@ namespace Unity.Entities
 
                 if (afterTypeInArchetype.IsManagedComponent)
                 {
-                    AppendManagedComponentData(entityGuid, afterTypeInArchetype.TypeIndex, afterIndexInTypeArray,
-                        afterChunk, afterEntityIndexInChunk, beforeIndexInTypeArray, beforeChunk, beforeEntityIndexInChunk);
+                    var afterManagedComponentIndex  = ((int*)(ChunkDataUtility.GetChunkBuffer(afterChunk) + afterArchetype->Offsets[afterIndexInTypeArray]))[afterEntityIndexInChunk];
+                    var beforeManagedComponentIndex  = ((int*)(ChunkDataUtility.GetChunkBuffer(beforeChunk) + beforeArchetype->Offsets[beforeIndexInTypeArray]))[beforeEntityIndexInChunk];
+
+                    AppendManagedComponentData(entityGuid, afterTypeInArchetype.TypeIndex, afterManagedComponentIndex, beforeManagedComponentIndex);
                     return;
                 }
 
@@ -380,19 +379,19 @@ namespace Unity.Entities
 
                 if (afterTypeInArchetype.IsBuffer)
                 {
-                    var beforeBuffer = (BufferHeader*) (GetChunkBuffer(beforeChunk) 
-                                                        + beforeArchetype->Offsets[beforeIndexInTypeArray] 
-                                                        + beforeEntityIndexInChunk 
-                                                        * beforeArchetype->SizeOfs[beforeIndexInTypeArray]);
-                    
+                    var beforeBuffer = (BufferHeader*)(ChunkDataUtility.GetChunkBuffer(beforeChunk)
+                        + beforeArchetype->Offsets[beforeIndexInTypeArray]
+                        + beforeEntityIndexInChunk
+                        * beforeArchetype->SizeOfs[beforeIndexInTypeArray]);
+
                     var beforeElementPtr = BufferHeader.GetElementPointer(beforeBuffer);
                     var beforeLength = beforeBuffer->Length;
 
-                    var afterBuffer = (BufferHeader*) (GetChunkBuffer(afterChunk) 
-                                                       + afterArchetype->Offsets[afterIndexInTypeArray] 
-                                                       + afterEntityIndexInChunk 
-                                                       * afterArchetype->SizeOfs[afterIndexInTypeArray]);
-                    
+                    var afterBuffer = (BufferHeader*)(ChunkDataUtility.GetChunkBuffer(afterChunk)
+                        + afterArchetype->Offsets[afterIndexInTypeArray]
+                        + afterEntityIndexInChunk
+                        * afterArchetype->SizeOfs[afterIndexInTypeArray]);
+
                     var afterElementPtr = BufferHeader.GetElementPointer(afterBuffer);
                     var afterLength = afterBuffer->Length;
 
@@ -476,9 +475,9 @@ namespace Unity.Entities
                     else
                     {
                         var typeInfo = TypeInfo[afterTypeInArchetype.TypeIndex & TypeManager.ClearFlagsMask];
-                        
-                        if (afterLength != beforeLength 
-                            || UnsafeUtility.MemCmp(beforeElementPtr, afterElementPtr, afterLength * typeInfo.ElementSize) != 0 
+
+                        if (afterLength != beforeLength
+                            || UnsafeUtility.MemCmp(beforeElementPtr, afterElementPtr, afterLength * typeInfo.ElementSize) != 0
                             || BlobAssetHashesAreDifferent(typeInfo, beforeElementPtr, afterElementPtr, afterLength))
                         {
                             var packedComponent = PackComponent(entityGuid, afterTypeInArchetype.TypeIndex);
@@ -494,19 +493,19 @@ namespace Unity.Entities
                         throw new Exception("Archetype->SizeOfs do not match");
                     }
 
-                    var beforeAddress = GetChunkBuffer(beforeChunk)
+                    var beforeAddress = ChunkDataUtility.GetChunkBuffer(beforeChunk)
                         + beforeArchetype->Offsets[beforeIndexInTypeArray]
                         + beforeArchetype->SizeOfs[beforeIndexInTypeArray]
                         * beforeEntityIndexInChunk;
 
-                    var afterAddress = GetChunkBuffer(afterChunk)
+                    var afterAddress = ChunkDataUtility.GetChunkBuffer(afterChunk)
                         + afterArchetype->Offsets[afterIndexInTypeArray]
                         + afterArchetype->SizeOfs[afterIndexInTypeArray]
                         * afterEntityIndexInChunk;
 
                     var typeInfo = TypeInfo[afterTypeInArchetype.TypeIndex & TypeManager.ClearFlagsMask];
-                    
-                    if (UnsafeUtility.MemCmp(beforeAddress, afterAddress, beforeArchetype->SizeOfs[beforeIndexInTypeArray]) != 0 
+
+                    if (UnsafeUtility.MemCmp(beforeAddress, afterAddress, beforeArchetype->SizeOfs[beforeIndexInTypeArray]) != 0
                         || BlobAssetHashesAreDifferent(typeInfo, beforeAddress, afterAddress, 1))
                     {
                         var packedComponent = PackComponent(entityGuid, afterTypeInArchetype.TypeIndex);
@@ -527,9 +526,9 @@ namespace Unity.Entities
             {
                 if (typeInfo.BlobAssetRefOffsetCount == 0)
                     return false;
-                
+
                 var offsets = BlobAssetRefOffsets + typeInfo.BlobAssetRefOffsetStartIndex;
-                
+
                 var elementOffset = 0;
 
                 for (var elementIndex = 0; elementIndex < elementCount; ++elementIndex)
@@ -537,9 +536,9 @@ namespace Unity.Entities
                     for (var offsetIndex = 0; offsetIndex < typeInfo.BlobAssetRefOffsetCount; ++offsetIndex)
                     {
                         var offset = elementOffset + offsets[offsetIndex].Offset;
-                        
-                        var beforeBlobAssetReference = (BlobAssetReferenceData*) (beforeAddress + offset);
-                        var afterBlobAssetReference = (BlobAssetReferenceData*) (afterAddress + offset);
+
+                        var beforeBlobAssetReference = (BlobAssetReferenceData*)(beforeAddress + offset);
+                        var afterBlobAssetReference = (BlobAssetReferenceData*)(afterAddress + offset);
 
                         if (GetBlobAssetHash(BeforeBlobAssetRemap, beforeBlobAssetReference) != GetBlobAssetHash(AfterBlobAssetRemap, afterBlobAssetReference))
                             return true;
@@ -560,7 +559,7 @@ namespace Unity.Entities
                 ExtractEntityReferencePatches(typeInfo, component, afterAddress, elementCount);
                 ExtractBlobAssetReferencePatches(typeInfo, component, afterAddress, elementCount);
             }
-            
+
             void ExtractEntityReferencePatches(
                 TypeManager.TypeInfo typeInfo,
                 PackedComponent component,
@@ -571,7 +570,7 @@ namespace Unity.Entities
                 {
                     return;
                 }
-                
+
                 var offsets = EntityOffsets + typeInfo.EntityOffsetStartIndex;
 
                 var elementOffset = 0;
@@ -597,7 +596,7 @@ namespace Unity.Entities
                     elementOffset += typeInfo.ElementSize;
                 }
             }
-            
+
             void ExtractBlobAssetReferencePatches(
                 TypeManager.TypeInfo typeInfo,
                 PackedComponent component,
@@ -608,9 +607,9 @@ namespace Unity.Entities
                 {
                     return;
                 }
-                
+
                 var offsets = BlobAssetRefOffsets + typeInfo.BlobAssetRefOffsetStartIndex;
-                
+
                 var elementOffset = 0;
 
                 for (var elementIndex = 0; elementIndex < elementCount; ++elementIndex)
@@ -618,7 +617,7 @@ namespace Unity.Entities
                     for (var offsetIndex = 0; offsetIndex < typeInfo.BlobAssetRefOffsetCount; ++offsetIndex)
                     {
                         var offset = elementOffset + offsets[offsetIndex].Offset;
-                        var blobAssetReference = (BlobAssetReferenceData*) (afterAddress + offset);
+                        var blobAssetReference = (BlobAssetReferenceData*)(afterAddress + offset);
                         var hash = GetBlobAssetHash(AfterBlobAssetRemap, blobAssetReference);
 
                         BlobAssetReferenceChanges.Add(new BlobAssetReferenceChange
@@ -667,18 +666,14 @@ namespace Unity.Entities
                 });
             }
 
-            void AppendManagedComponentData(EntityGuid entityGuid, int typeIndex, int afterTypeIndex, Chunk* afterChunk, int afterEntityIndex, int beforeTypeIndex = -1, Chunk* beforeChunk = null, int beforeEntityIndex = -1)
+            void AppendManagedComponentData(EntityGuid entityGuid, int typeIndex, int afterManagedComponentIndex, int beforeManagedComponentIndex = -1)
             {
                 ManagedComponentChanges.Add(new DeferredManagedComponentChange
                 {
                     EntityGuid = entityGuid,
                     TypeIndex = typeIndex,
-                    AfterTypeIndex = afterTypeIndex,
-                    AfterChunk = afterChunk,
-                    AfterEntityIndex = afterEntityIndex,
-                    BeforeTypeIndex = beforeTypeIndex,
-                    BeforeChunk = beforeChunk,
-                    BeforeEntityIndex = beforeEntityIndex,
+                    AfterManagedComponentIndex = afterManagedComponentIndex,
+                    BeforeManagedComponentIndex = beforeManagedComponentIndex
                 });
             }
 
@@ -716,7 +711,7 @@ namespace Unity.Entities
                 return true;
             }
         }
-        
+
         static readonly PackedSharedComponentDataChange[] s_EmptySetSharedComponentDiff = new PackedSharedComponentDataChange[0];
         static readonly PackedManagedComponentDataChange[] s_EmptySetManagedComponentDiff = new PackedManagedComponentDataChange[0];
 
@@ -737,8 +732,8 @@ namespace Unity.Entities
                 TypeInfo = TypeManager.GetTypeInfoPointer(),
                 EntityOffsets = TypeManager.GetEntityOffsetsPointer(),
                 BlobAssetRefOffsets = TypeManager.GetBlobAssetRefOffsetsPointer(),
-                AfterEntityComponentStore = entityChanges.AfterEntityManager.EntityComponentStore,
-                BeforeEntityComponentStore = entityChanges.BeforeEntityManager.EntityComponentStore,
+                AfterEntityComponentStore = entityChanges.AfterEntityManager.GetCheckedEntityDataAccess()->EntityComponentStore,
+                BeforeEntityComponentStore = entityChanges.BeforeEntityManager.GetCheckedEntityDataAccess()->EntityComponentStore,
                 CreatedEntities = entityChanges.CreatedEntities,
                 ModifiedEntities = entityChanges.ModifiedEntities,
                 Entities = componentChanges.Entities,
@@ -763,8 +758,8 @@ namespace Unity.Entities
         }
 
         static EntityChangeSet CreateEntityChangeSet(
-            EntityInChunkChanges entityInChunkChanges, 
-            ComponentChanges componentChanges, 
+            EntityInChunkChanges entityInChunkChanges,
+            ComponentChanges componentChanges,
             BlobAssetChanges blobAssetChanges,
             Allocator allocator)
         {
@@ -772,24 +767,25 @@ namespace Unity.Entities
             {
                 return default;
             }
+            s_CreateEntityChangeSetProfilerMarker.Begin();
 
             // IMPORTANT. This can add to the packed collections. It must be done before adding destroyed entities.
             var sharedComponentDataChanges = GetChangedSharedComponents(
                 componentChanges.Entities,
                 componentChanges.ComponentTypes,
                 componentChanges.SharedComponentChanges,
-                entityInChunkChanges.BeforeEntityManager.ManagedComponentStore,
-                entityInChunkChanges.AfterEntityManager.ManagedComponentStore);
+                entityInChunkChanges.BeforeEntityManager.GetCheckedEntityDataAccess()->ManagedComponentStore,
+                entityInChunkChanges.AfterEntityManager.GetCheckedEntityDataAccess()->ManagedComponentStore);
 
             var managedComponentDataChanges = GetChangedManagedComponents(
                 componentChanges.Entities,
                 componentChanges.ComponentTypes,
                 componentChanges.ManagedComponentChanges,
                 componentChanges.EntityReferenceChanges,
-                entityInChunkChanges.BeforeEntityManager.EntityComponentStore,
-                entityInChunkChanges.AfterEntityManager.EntityComponentStore,
-                entityInChunkChanges.BeforeEntityManager.ManagedComponentStore,
-                entityInChunkChanges.AfterEntityManager.ManagedComponentStore);
+                entityInChunkChanges.BeforeEntityManager.GetCheckedEntityDataAccess()->EntityComponentStore,
+                entityInChunkChanges.AfterEntityManager.GetCheckedEntityDataAccess()->EntityComponentStore,
+                entityInChunkChanges.BeforeEntityManager.GetCheckedEntityDataAccess()->ManagedComponentStore,
+                entityInChunkChanges.AfterEntityManager.GetCheckedEntityDataAccess()->ManagedComponentStore);
 
             var entities = componentChanges.Entities.List;
 
@@ -799,16 +795,16 @@ namespace Unity.Entities
             }
 
             var names = GetEntityNames(entities,
-                                       entityInChunkChanges.CreatedEntities,
-                                       entityInChunkChanges.ModifiedEntities,
-                                       entityInChunkChanges.DestroyedEntities,
-                                       entityInChunkChanges.AfterEntityManager,
-                                       entityInChunkChanges.BeforeEntityManager,
-                                       allocator);
+                entityInChunkChanges.CreatedEntities,
+                entityInChunkChanges.ModifiedEntities,
+                entityInChunkChanges.DestroyedEntities,
+                entityInChunkChanges.AfterEntityManager,
+                entityInChunkChanges.BeforeEntityManager,
+                allocator);
 
             // Allocate and copy in to the results buffers.
             var result = new EntityChangeSet
-            (
+                (
                 entityInChunkChanges.CreatedEntities.Length,
                 entityInChunkChanges.DestroyedEntities.Length,
                 componentChanges.Entities.List.ToArray(allocator),
@@ -827,8 +823,9 @@ namespace Unity.Entities
                 blobAssetChanges.CreatedBlobAssets.ToArray(allocator),
                 blobAssetChanges.DestroyedBlobAssets.ToArray(allocator),
                 blobAssetChanges.BlobAssetData.ToArray(allocator)
-            );
+                );
 
+            s_CreateEntityChangeSetProfilerMarker.End();
             return result;
         }
 
@@ -843,7 +840,7 @@ namespace Unity.Entities
             {
                 return s_EmptySetSharedComponentDiff;
             }
-
+            s_GetChangedSharedComponentsProfilerMarker.Begin();
             var result = new List<PackedSharedComponentDataChange>();
 
             for (var i = 0; i < changes.Length; i++)
@@ -851,6 +848,9 @@ namespace Unity.Entities
                 var change = changes[i];
 
                 object afterValue = null;
+
+                if (change.AfterSharedComponentIndex == 0 && change.BeforeSharedComponentIndex == 0)
+                    continue;
 
                 if (change.AfterSharedComponentIndex != 0)
                 {
@@ -879,13 +879,15 @@ namespace Unity.Entities
                     PackedTypeIndex = packedTypeIndex
                 };
 
+                (afterValue as IRefCounted)?.Retain();
+
                 result.Add(new PackedSharedComponentDataChange
                 {
                     Component = packedComponent,
                     BoxedSharedValue = afterValue
                 });
             }
-
+            s_GetChangedSharedComponentsProfilerMarker.End();
             return result.ToArray();
         }
 
@@ -903,19 +905,29 @@ namespace Unity.Entities
             {
                 return s_EmptySetManagedComponentDiff;
             }
+            s_GetChangedManagedComponentsProfilerMarker.Begin();
 
             var entityGuidTypeIndex = TypeManager.GetTypeIndex<EntityGuid>();
             var result = new List<PackedManagedComponentDataChange>();
+            var managedObjectClone = new ManagedObjectClone();
 
             for (var i = 0; i < changes.Length; i++)
             {
                 var change = changes[i];
+                var typeInfo = TypeManager.GetTypeInfo(change.TypeIndex);
 
-                var afterValue = afterManagedComponentStore.GetManagedObject(change.AfterChunk, change.AfterTypeIndex, change.AfterEntityIndex);
-
-                if (change.BeforeEntityIndex > -1)
+                if (typeInfo.Category == TypeManager.TypeCategory.Class)
                 {
-                    var beforeValue = beforeManagedComponentStore.GetManagedObject(change.BeforeChunk, change.BeforeTypeIndex, change.BeforeEntityIndex);
+                    // Hybrid Components should be ignored in the diff, the Companion Link will clone the Companion GameObject
+                    // and when we apply the diff we'll relink the Hybrid Component to the ones from the Companion GameObject
+                    continue;
+                }
+
+                var afterValue = afterManagedComponentStore.GetManagedComponent(change.AfterManagedComponentIndex);
+
+                if (change.BeforeManagedComponentIndex > -1)
+                {
+                    var beforeValue = beforeManagedComponentStore.GetManagedComponent(change.BeforeManagedComponentIndex);
 
                     if (TypeManager.Equals(beforeValue, afterValue, change.TypeIndex))
                     {
@@ -923,7 +935,6 @@ namespace Unity.Entities
                     }
                 }
 
-                var typeInfo = TypeManager.GetTypeInfo(change.TypeIndex);
                 var packedEntityIndex = packedEntityCollection.GetOrAdd(change.EntityGuid);
                 var packedTypeIndex = packedStableTypeHashCollection.GetOrAdd(new ComponentTypeHash
                 {
@@ -936,6 +947,8 @@ namespace Unity.Entities
                     PackedTypeIndex = packedTypeIndex
                 };
 
+                afterValue = managedObjectClone.Clone(afterValue);
+
                 result.Add(new PackedManagedComponentDataChange
                 {
                     Component = packedComponent,
@@ -947,7 +960,7 @@ namespace Unity.Entities
                     AddEntityPatchesForObject(afterValue, packedComponent, patches, afterEntityComponentStore, entityGuidTypeIndex);
                 }
             }
-
+            s_GetChangedManagedComponentsProfilerMarker.End();
             return result.ToArray();
         }
 
@@ -967,6 +980,7 @@ namespace Unity.Entities
             EntityManager beforeEntityManager,
             Allocator allocator)
         {
+            s_GetEntityNamesProfilerMarker.Begin();
             var names = new NativeArray<NativeString64>(entityGuids.Length, allocator);
             var index = 0;
 
@@ -976,7 +990,7 @@ namespace Unity.Entities
             {
                 var name = new NativeString64();
 #if UNITY_EDITOR
-                name.CopyFrom(afterEntityManager.GetName(GetEntityFromEntityInChunk(createdEntities[i].AfterEntityInChunk)));
+                name.CopyFrom(afterEntityManager.GetName(ChunkDataUtility.GetEntityFromEntityInChunk(createdEntities[i].AfterEntityInChunk)));
 #endif
                 names[index++] = name;
             }
@@ -993,7 +1007,7 @@ namespace Unity.Entities
 
                 var name = new NativeString64();
 #if UNITY_EDITOR
-                name.CopyFrom(afterEntityManager.GetName(GetEntityFromEntityInChunk(modifiedEntities[i].AfterEntityInChunk)));
+                name.CopyFrom(afterEntityManager.GetName(ChunkDataUtility.GetEntityFromEntityInChunk(modifiedEntities[i].AfterEntityInChunk)));
 #endif
                 names[index++] = name;
                 entityGuidIndex++;
@@ -1005,126 +1019,74 @@ namespace Unity.Entities
             {
                 var name = new NativeString64();
 #if UNITY_EDITOR
-                name.CopyFrom(beforeEntityManager.GetName(GetEntityFromEntityInChunk(destroyedEntities[i].BeforeEntityInChunk)));
+                name.CopyFrom(beforeEntityManager.GetName(ChunkDataUtility.GetEntityFromEntityInChunk(destroyedEntities[i].BeforeEntityInChunk)));
 #endif
                 names[index++] = name;
             }
-
+            s_GetEntityNamesProfilerMarker.End();
             return names;
         }
 
-        static Entity GetEntityFromEntityInChunk(EntityInChunk entityInChunk)
-        {
-            var chunk = entityInChunk.Chunk;
-            var archetype = chunk->Archetype;
-            var buffer = GetChunkBuffer(chunk) + archetype->Offsets[0] + entityInChunk.IndexInChunk * archetype->SizeOfs[0];
-            return *(Entity*)buffer;
-        }
-
-        internal static void AddEntityPatchesForObject(object container, PackedComponent component, NativeList<EntityReferenceChange> patches, 
+        internal static void AddEntityPatchesForObject(object container, PackedComponent component, NativeList<EntityReferenceChange> patches,
             EntityComponentStore* afterEntityComponentStore, int entityGuidTypeIndex)
         {
 #if !NET_DOTS
-            var visitor = new EntityDiffWriter(component, patches, afterEntityComponentStore, entityGuidTypeIndex);
-            var changeTracker = new ChangeTracker();
-            var type = container.GetType();
-
-            var resolved = PropertyBagResolver.Resolve(type);
-            if (resolved != null)
-            {
-                resolved.Accept(ref container, ref visitor, ref changeTracker);
-            }
-            else
-                throw new ArgumentException($"Type '{type.FullName}' not supported for visiting.");
+            PropertyContainer.Visit(container, new EntityDiffWriter(component, patches, afterEntityComponentStore, entityGuidTypeIndex));
 #endif
         }
 
 #if !NET_DOTS
-        internal unsafe class EntityDiffWriter : PropertyVisitor
+        class EntityDiffWriter : PropertyVisitor
         {
-            protected EntityDiffAdapter _EntityDiffAdapter { get; }
-
             public EntityDiffWriter(PackedComponent component, NativeList<EntityReferenceChange> patches, EntityComponentStore* afterEntityComponentStore, int entityGuidTypeIndex)
             {
-                _EntityDiffAdapter = new EntityDiffAdapter(component, patches, afterEntityComponentStore, entityGuidTypeIndex);
-                AddAdapter(_EntityDiffAdapter);
+                AddAdapter(new EntityDiffAdapter(component, patches, afterEntityComponentStore, entityGuidTypeIndex));
             }
 
-            internal unsafe class EntityDiffAdapter : IPropertyVisitorAdapter
-                , IVisitAdapter<Entity>
-                , IVisitAdapter
-                , IVisitCollectionAdapter
-                , IVisitContainerAdapter
+            class EntityDiffAdapter : Properties.Adapters.IVisit<Entity>
             {
-                protected PackedComponent Component;
-                protected NativeList<EntityReferenceChange> Patches { get; }
-                protected EntityComponentStore* AfterEntityComponentStore { get; }
-                protected int EntityGuidTypeIndex;
-                protected int EntityPatchId;
+                readonly PackedComponent _Component;
+                readonly NativeList<EntityReferenceChange> _Patches;
+                readonly EntityComponentStore* _AfterEntityComponentStore;
+                readonly int _EntityGuidTypeIndex;
 
-                public unsafe EntityDiffAdapter(PackedComponent component, NativeList<EntityReferenceChange> patches, EntityComponentStore* afterEntityComponentStore, int entityGuidTypeIndex)
+                int _EntityPatchId;
+
+                public EntityDiffAdapter(PackedComponent component, NativeList<EntityReferenceChange> patches, EntityComponentStore* afterEntityComponentStore, int entityGuidTypeIndex)
                 {
-                    Component = component;
-                    Patches = patches;
-                    AfterEntityComponentStore = afterEntityComponentStore;
-                    EntityGuidTypeIndex = entityGuidTypeIndex;
-                    EntityPatchId = 0;
+                    _Component = component;
+                    _Patches = patches;
+                    _AfterEntityComponentStore = afterEntityComponentStore;
+                    _EntityGuidTypeIndex = entityGuidTypeIndex;
+                    _EntityPatchId = 0;
                 }
 
-                public unsafe VisitStatus Visit<TProperty, TContainer>(IPropertyVisitor visitor, TProperty property, ref TContainer container, ref Entity value, ref ChangeTracker changeTracker)
-                    where TProperty : IProperty<TContainer, Entity>
+                public VisitStatus Visit<TContainer>(Property<TContainer, Entity> property, ref TContainer container, ref Entity value)
                 {
                     TryGetEntityGuid(value, out var entityGuid);
 
-                    value = new Entity() { Index = EntityPatchId, Version = -1 };
+                    value = new Entity { Index = _EntityPatchId, Version = -1 };
 
-                    Patches.Add(new EntityReferenceChange
+                    _Patches.Add(new EntityReferenceChange
                     {
-                        Component = Component,
-                        Offset = EntityPatchId++,
+                        Component = _Component,
+                        Offset = _EntityPatchId++,
                         Value = entityGuid
                     });
 
-                    return VisitStatus.Handled;
+                    return VisitStatus.Stop;
                 }
 
-                public VisitStatus Visit<TProperty, TContainer, TValue>(IPropertyVisitor visitor, TProperty property, ref TContainer container, ref TValue value, ref ChangeTracker changeTracker) where TProperty : IProperty<TContainer, TValue>
-                {
-                    return VisitStatus.Unhandled;
-                }
-
-                public VisitStatus BeginCollection<TProperty, TContainer, TValue>(IPropertyVisitor visitor, TProperty property, ref TContainer container, ref TValue value, ref ChangeTracker changeTracker) where TProperty : ICollectionProperty<TContainer, TValue>
-                {
-                    if (value == null)
-                        return VisitStatus.Override;
-                    return VisitStatus.Unhandled;
-                }
-
-                public void EndCollection<TProperty, TContainer, TValue>(IPropertyVisitor visitor, TProperty property, ref TContainer container, ref TValue value, ref ChangeTracker changeTracker) where TProperty : ICollectionProperty<TContainer, TValue>
-                {
-                }
-
-                public VisitStatus BeginContainer<TProperty, TValue, TContainer>(IPropertyVisitor visitor, TProperty property, ref TContainer container, ref TValue value, ref ChangeTracker changeTracker) where TProperty : IProperty<TContainer, TValue>
-                {
-                    if (value == null)
-                        return VisitStatus.Override;
-                    return VisitStatus.Unhandled;
-                }
-
-                public void EndContainer<TProperty, TValue, TContainer>(IPropertyVisitor visitor, TProperty property, ref TContainer container, ref TValue value, ref ChangeTracker changeTracker) where TProperty : IProperty<TContainer, TValue>
-                {
-                }
-                
-                private bool TryGetEntityGuid(Entity e, out EntityGuid guid)
+                bool TryGetEntityGuid(Entity e, out EntityGuid guid)
                 {
                     guid = default;
 
-                    if (!AfterEntityComponentStore->HasComponent(e, EntityGuidTypeIndex))
+                    if (!_AfterEntityComponentStore->HasComponent(e, _EntityGuidTypeIndex))
                     {
                         return false;
                     }
 
-                    guid = *(EntityGuid*)AfterEntityComponentStore->GetComponentDataWithTypeRO(e, EntityGuidTypeIndex);
+                    guid = *(EntityGuid*)_AfterEntityComponentStore->GetComponentDataWithTypeRO(e, _EntityGuidTypeIndex);
                     return true;
                 }
             }

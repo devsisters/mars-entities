@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.ComponentModel;
 
 namespace Unity.Entities
@@ -23,7 +23,7 @@ namespace Unity.Entities
         public bool IsSystemStateComponent => (TypeIndex & TypeManager.SystemStateTypeFlag) != 0;
         public bool IsSystemStateSharedComponent => (TypeIndex & TypeManager.SystemStateSharedComponentTypeFlag) == TypeManager.SystemStateSharedComponentTypeFlag;
         public bool IsSharedComponent => (TypeIndex & TypeManager.SharedComponentTypeFlag) != 0;
-        public bool IsManagedComponent => (TypeIndex & TypeManager.ManagedComponentTypeFlag) != 0;
+        public bool IsManagedComponent => TypeManager.IsManagedComponent(TypeIndex);
         public bool IsZeroSized => (TypeIndex & TypeManager.ZeroSizeInChunkTypeFlag) != 0;
         public bool IsChunkComponent => (TypeIndex & TypeManager.ChunkComponentTypeFlag) != 0;
         public bool HasEntityReferences => (TypeIndex & TypeManager.HasNoEntityReferencesFlag) == 0;
@@ -31,6 +31,16 @@ namespace Unity.Entities
         public static ComponentType ReadWrite<T>()
         {
             return FromTypeIndex(TypeManager.GetTypeIndex<T>());
+        }
+
+        public static ComponentType ReadWrite(Type type)
+        {
+            return FromTypeIndex(TypeManager.GetTypeIndex(type));
+        }
+
+        public static ComponentType ReadWrite(int typeIndex)
+        {
+            return FromTypeIndex(typeIndex);
         }
 
         public static ComponentType FromTypeIndex(int typeIndex)
@@ -80,19 +90,39 @@ namespace Unity.Entities
             return ReadOnly(typeIndex);
         }
 
+        public static ComponentType ChunkComponentReadOnly(Type type)
+        {
+            var typeIndex = TypeManager.MakeChunkComponentTypeIndex(TypeManager.GetTypeIndex(type));
+            return ReadOnly(typeIndex);
+        }
+
+        public static ComponentType ChunkComponentExclude<T>()
+        {
+            var typeIndex = TypeManager.MakeChunkComponentTypeIndex(TypeManager.GetTypeIndex<T>());
+            return Exclude(typeIndex);
+        }
+
+        public static ComponentType ChunkComponentExclude(Type type)
+        {
+            var typeIndex = TypeManager.MakeChunkComponentTypeIndex(TypeManager.GetTypeIndex(type));
+            return Exclude(typeIndex);
+        }
 
         public static ComponentType Exclude(Type type)
         {
-            ComponentType t = FromTypeIndex(TypeManager.GetTypeIndex(type));
+            return Exclude(TypeManager.GetTypeIndex(type));
+        }
+
+        public static ComponentType Exclude(int typeIndex)
+        {
+            ComponentType t = FromTypeIndex(typeIndex);
             t.AccessModeType = AccessMode.Exclude;
             return t;
         }
 
         public static ComponentType Exclude<T>()
         {
-            ComponentType t = ReadWrite<T>();
-            t.AccessModeType = AccessMode.Exclude;
-            return t;
+            return Exclude(TypeManager.GetTypeIndex<T>());
         }
 
         public ComponentType(Type type, AccessMode accessModeType = AccessMode.ReadWrite)
@@ -111,7 +141,7 @@ namespace Unity.Entities
             return new ComponentType(type, AccessMode.ReadWrite);
         }
 
-        public static bool operator <(ComponentType lhs, ComponentType rhs)
+        public static bool operator<(ComponentType lhs, ComponentType rhs)
         {
             if (lhs.TypeIndex == rhs.TypeIndex)
                 return lhs.AccessModeType < rhs.AccessModeType;
@@ -119,17 +149,17 @@ namespace Unity.Entities
             return lhs.TypeIndex < rhs.TypeIndex;
         }
 
-        public static bool operator >(ComponentType lhs, ComponentType rhs)
+        public static bool operator>(ComponentType lhs, ComponentType rhs)
         {
             return rhs < lhs;
         }
 
-        public static bool operator ==(ComponentType lhs, ComponentType rhs)
+        public static bool operator==(ComponentType lhs, ComponentType rhs)
         {
             return lhs.TypeIndex == rhs.TypeIndex && lhs.AccessModeType == rhs.AccessModeType;
         }
 
-        public static bool operator !=(ComponentType lhs, ComponentType rhs)
+        public static bool operator!=(ComponentType lhs, ComponentType rhs)
         {
             return lhs.TypeIndex != rhs.TypeIndex || lhs.AccessModeType != rhs.AccessModeType;
         }
@@ -145,12 +175,11 @@ namespace Unity.Entities
             return true;
         }
 
-
 #if ENABLE_UNITY_COLLECTIONS_CHECKS
         public override string ToString()
         {
 #if NET_DOTS
-            var name = TypeManager.GetTypeInfo(TypeIndex).StableTypeHash.ToString();
+            var name = TypeManager.GetTypeInfo(TypeIndex).Debug.TypeName;
 #else
             var name = GetManagedType().Name;
             if (IsBuffer)
@@ -164,6 +193,7 @@ namespace Unity.Entities
 #endif
             return name;
         }
+
 #endif
 
         public bool Equals(ComponentType other)
@@ -173,7 +203,7 @@ namespace Unity.Entities
 
         public override bool Equals(object obj)
         {
-            return obj is ComponentType && (ComponentType) obj == this;
+            return obj is ComponentType && (ComponentType)obj == this;
         }
 
         public override int GetHashCode()

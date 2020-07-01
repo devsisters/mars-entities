@@ -22,7 +22,7 @@ namespace Unity.Scenes
             return GUID == other.GUID && TargetHash == other.TargetHash;
         }
     }
-    
+
     struct ResolvedSubSceneID : IEquatable<ResolvedSubSceneID>
     {
         public SubSceneGUID SubSceneGUID;
@@ -33,12 +33,11 @@ namespace Unity.Scenes
             return SubSceneGUID == other.SubSceneGUID && TargetHash == other.TargetHash;
         }
     }
-    
+
     struct WaitingSubScene
     {
         public Hash128 TargetHash;
-        public int SubSectionCount;
-        public List<NativeArray<RuntimeGlobalObjectId>> SubSections;
+        public NativeArray<RuntimeGlobalObjectId> RuntimeGlobalObjectIds;
     }
 
 
@@ -49,39 +48,46 @@ namespace Unity.Scenes
     [UpdateInGroup(typeof(LiveLinkRuntimeSystemGroup))]
     class LiveLinkPlayerAssetRefreshSystem : ComponentSystem
     {
-        public static GlobalAssetObjectResolver _GlobalAssetObjectResolver = new GlobalAssetObjectResolver();
+        public static GlobalAssetObjectResolver globalAssetObjectResolver = new GlobalAssetObjectResolver();
 
-        private Dictionary<Hash128, Hash128>            _WaitingForAssets = new Dictionary<Hash128, Hash128>();
-        private Dictionary<SubSceneGUID, WaitingSubScene>    _WaitingForSubScenes = new Dictionary<SubSceneGUID, WaitingSubScene>();
-        public Dictionary<SubSceneGUID, Hash128>            _TrackedSubScenes = new Dictionary<SubSceneGUID, Hash128>();
+        Dictionary<Hash128, Hash128>                 m_WaitingForAssets = new Dictionary<Hash128, Hash128>();
+        Dictionary<SubSceneGUID, WaitingSubScene>    m_WaitingForSubScenes = new Dictionary<SubSceneGUID, WaitingSubScene>();
+        public Dictionary<SubSceneGUID, Hash128>     TrackedSubScenes = new Dictionary<SubSceneGUID, Hash128>();
 
-        private EntityQuery                     _ResourceRequests;
-        private EntityQuery                     _SubSceneAssetRequests;
+        EntityQuery                     m_ResourceRequests;
+        EntityQuery                     m_SubSceneAssetRequests;
+        LiveLinkPlayerSystem m_PlayerSystem;
+        IEditorPlayerConnection m_Connection;
 
         // The resource has been requested from the editor but not necessarily been loaded yet.
         public struct ResourceRequested : IComponentData {}
         public struct SubSceneRequested : IComponentData {}
 
-        public static GlobalAssetObjectResolver GlobalAssetObjectResolver => _GlobalAssetObjectResolver;
+        public static GlobalAssetObjectResolver GlobalAssetObjectResolver => globalAssetObjectResolver;
 
+        protected override void OnCreate()
+        {
+            m_PlayerSystem = World.GetOrCreateSystem<LiveLinkPlayerSystem>();
+        }
 
         protected override void OnStartRunning()
         {
-            PlayerConnection.instance.Register(LiveLinkMsg.ResponseAssetBundleForGUID, ReceiveAssetBundle);
-            PlayerConnection.instance.Register(LiveLinkMsg.ResponseAssetBundleTargetHash, ReceiveResponseAssetBundleTargetHash);
-            
-            PlayerConnection.instance.Register(LiveLinkMsg.ResponseSubSceneTargetHash, ReceiveResponseSubSceneTargetHash);
-            PlayerConnection.instance.Register(LiveLinkMsg.ResponseSubSceneForGUIDHeader, ReceiveSubSceneHeader);
-            PlayerConnection.instance.Register(LiveLinkMsg.ResponseSubSceneForGUIDEntityBinaryFile, ReceiveEntityBinaryFile);
-            PlayerConnection.instance.Register(LiveLinkMsg.ResponseSubSceneForGUIDRefs, ReceiveSubSceneRefGUIDs);
+            m_Connection = m_PlayerSystem.Connection;
+            m_Connection.Register(LiveLinkMsg.EditorResponseAssetForGUID, ReceiveAsset);
+            m_Connection.Register(LiveLinkMsg.EditorResponseAssetTargetHash, ReceiveAssetTargetHash);
 
-            _ResourceRequests = GetEntityQuery(new EntityQueryDesc
+            m_Connection.Register(LiveLinkMsg.EditorResponseSubSceneTargetHash, ReceiveSubSceneTargetHash);
+            m_Connection.Register(LiveLinkMsg.EditorResponseSubSceneForGUID, ReceiveSubScene);
+
+            m_Connection.Register(LiveLinkMsg.EditorSendBuildArtifact, ReceiveBuildArtifact);
+
+            m_ResourceRequests = GetEntityQuery(new EntityQueryDesc
             {
                 All = new[] { ComponentType.ReadOnly<ResourceGUID>() },
                 None = new[] { ComponentType.ReadOnly<ResourceRequested>(), ComponentType.ReadOnly<ResourceLoaded>() }
             });
-            
-            _SubSceneAssetRequests = GetEntityQuery(new EntityQueryDesc
+
+            m_SubSceneAssetRequests = GetEntityQuery(new EntityQueryDesc
             {
                 All = new[] { ComponentType.ReadOnly<SubSceneGUID>() },
                 None = new[] { ComponentType.ReadOnly<SubSceneRequested>() }
@@ -90,202 +96,109 @@ namespace Unity.Scenes
 
         protected override void OnStopRunning()
         {
-            PlayerConnection.instance.Unregister(LiveLinkMsg.ResponseAssetBundleForGUID, ReceiveAssetBundle);
-            PlayerConnection.instance.Unregister(LiveLinkMsg.ResponseAssetBundleTargetHash, ReceiveResponseAssetBundleTargetHash);
-            
-            PlayerConnection.instance.Unregister(LiveLinkMsg.ResponseSubSceneTargetHash, ReceiveResponseSubSceneTargetHash);
-            PlayerConnection.instance.Unregister(LiveLinkMsg.ResponseSubSceneForGUIDHeader, ReceiveSubSceneHeader);
-            PlayerConnection.instance.Unregister(LiveLinkMsg.ResponseSubSceneForGUIDEntityBinaryFile, ReceiveEntityBinaryFile);
-            PlayerConnection.instance.Unregister(LiveLinkMsg.ResponseSubSceneForGUIDRefs, ReceiveSubSceneRefGUIDs);
+            m_Connection.Unregister(LiveLinkMsg.EditorResponseAssetForGUID, ReceiveAsset);
+            m_Connection.Unregister(LiveLinkMsg.EditorResponseAssetTargetHash, ReceiveAssetTargetHash);
+
+            m_Connection.Unregister(LiveLinkMsg.EditorResponseSubSceneTargetHash, ReceiveSubSceneTargetHash);
+            m_Connection.Unregister(LiveLinkMsg.EditorResponseSubSceneForGUID, ReceiveSubScene);
+
+            m_Connection.Unregister(LiveLinkMsg.EditorSendBuildArtifact, ReceiveBuildArtifact);
         }
 
-        string GetCachePath(Hash128 targetHash)
+        static string GetCachePath(Hash128 targetHash)
         {
             return $"{Application.persistentDataPath}/{targetHash}";
         }
 
-        string GetTempCachePath()
+        static string GetTempCachePath()
         {
             return $"{Application.persistentDataPath}/{Path.GetRandomFileName()}";
         }
 
         public Hash128 GetTrackedSubSceneTargetHash(SubSceneGUID subSceneGUID)
         {
-            if (!_TrackedSubScenes.TryGetValue(subSceneGUID, out var targetHash))
+            if (!TrackedSubScenes.TryGetValue(subSceneGUID, out var targetHash))
             {
-                Debug.Log($"Failed to find scubScene in TrackedSubScenes: {subSceneGUID}");
+                Debug.Log($"Failed to find subScene in TrackedSubScenes: {subSceneGUID}");
                 targetHash = new Hash128();
             }
 
             return targetHash;
         }
 
-        //TODO: There is too much code duplication here, refactor this to receive general artifacts from the editor
-        unsafe void ReceiveSubSceneRefGUIDs(MessageEventArgs args)
+        static unsafe void ReceiveBuildArtifact(MessageEventArgs args)
         {
-            fixed (byte* ptr = args.data)
+            fixed(byte* ptr = args.data)
             {
+                LiveLinkMsg.LogInfo($"ReceiveBuildArtifact => Buffer Size: {args.data.Length}");
                 var reader = new UnsafeAppendBuffer.Reader(ptr, args.data.Length);
-                var subSceneAsset = reader.ReadNext<ResolvedSubSceneID>();
-                var sectionIndex = reader.ReadNext<int>();
-                reader.ReadNext(out NativeArray<RuntimeGlobalObjectId> objRefGUIDs, Allocator.Persistent);
-                var refObjGUIDsPath = EntityScenesPaths.GetLiveLinkCachePath(subSceneAsset.TargetHash, EntityScenesPaths.PathType.EntitiesUnityObjectReferences, sectionIndex);
-                
-                // Not printing error because this can happen when running the same player multiple times on the same machine
-                if (File.Exists(refObjGUIDsPath))
+                reader.ReadNext(out string artifactFileName);
+                string artifactPath = EntityScenesPaths.ComposeLiveLinkCachePath(artifactFileName);
+
+                if (!File.Exists(artifactPath))
                 {
-                    LiveLinkMsg.LogInfo($"Received {subSceneAsset.SubSceneGUID} | {subSceneAsset.TargetHash} but it already exists on disk");
-                }
-                else
-                {
-                    LiveLinkMsg.LogInfo($"ReceieveSubSceneRefGUIDs => {subSceneAsset.SubSceneGUID} | {subSceneAsset.TargetHash},");
-                    
+                    LiveLinkMsg.LogInfo($"ReceiveBuildArtifact => {artifactPath}");
+
                     var tempCachePath = GetTempCachePath();
-                    using (var writer = new StreamBinaryWriter(tempCachePath))
-                    {
-                        writer.Write(objRefGUIDs.Length);
-                        writer.WriteArray(objRefGUIDs);
-                    }
-                    
+
                     try
                     {
-                        File.Move(tempCachePath, refObjGUIDsPath);
+                        using (var stream = File.OpenWrite(tempCachePath))
+                        {
+                            stream.Write(args.data, reader.Offset, args.data.Length - reader.Offset);
+                        }
+
+                        File.Move(tempCachePath, artifactPath);
+
+                        LiveLinkMsg.LogInfo($"ReceiveBuildArtifact => Successfully written to disc.");
                     }
                     catch (Exception e)
                     {
-                        File.Delete(tempCachePath);
-                        if (!File.Exists(refObjGUIDsPath))
+                        if (File.Exists(tempCachePath))
+                        {
+                            File.Delete(tempCachePath);
+                        }
+
+                        if (!File.Exists(artifactPath))
                         {
                             Debug.LogError($"Failed to move temporary file. Exception: {e.Message}");
-                            LiveLinkMsg.LogInfo($"Failed to move temporary file. Exception: {e.Message}");
                         }
                     }
                 }
-                
-                if (!_WaitingForSubScenes.ContainsKey(subSceneAsset.SubSceneGUID))
+            }
+        }
+
+        unsafe void ReceiveSubScene(MessageEventArgs args)
+        {
+            fixed(byte* ptr = args.data)
+            {
+                var reader = new UnsafeAppendBuffer.Reader(ptr, args.data.Length);
+                reader.ReadNext(out ResolvedSubSceneID subSceneId);
+                reader.ReadNext(out NativeArray<RuntimeGlobalObjectId> runtimeGlobalObjectIds, Allocator.Persistent);
+
+                LiveLinkMsg.LogInfo($"ReceiveSubScene => SubScene received {subSceneId} | Asset Dependencies {runtimeGlobalObjectIds.Length}");
+
+                if (!IsSubSceneAvailable(subSceneId))
                 {
-                    Debug.LogError($"Received {subSceneAsset.SubSceneGUID} | {subSceneAsset.TargetHash} without requesting it");
-                    LiveLinkMsg.LogInfo($"Received {subSceneAsset.SubSceneGUID} | {subSceneAsset.TargetHash} without requesting it");
+                    Debug.LogError("SubScene is missing artifacts!");
                     return;
                 }
 
-                var waitingSubScene = _WaitingForSubScenes[subSceneAsset.SubSceneGUID];
-                waitingSubScene.SubSections.Add(objRefGUIDs);
-                _WaitingForSubScenes[subSceneAsset.SubSceneGUID] = waitingSubScene;
-            }
-        }
-        
-        unsafe void ReceiveSubSceneHeader(MessageEventArgs args)
-        {
-            fixed (byte* ptr = args.data)
-            {
-                var reader = new UnsafeAppendBuffer.Reader(ptr, args.data.Length);
-                var subSceneAsset = reader.ReadNext<ResolvedSubSceneID>();
-                var subSectionCount = reader.ReadNext<int>();
-                var headerPath = EntityScenesPaths.GetLiveLinkCachePath(subSceneAsset.TargetHash, EntityScenesPaths.PathType.EntitiesHeader, -1);
-                
-                // Not printing error because this can happen when running the same player multiple times on the same machine
-                if (File.Exists(headerPath))
-                {
-                    LiveLinkMsg.LogInfo($"Received {subSceneAsset.SubSceneGUID} | {subSceneAsset.TargetHash} but it already exists on disk");
-                }
-                else
-                {
-                    var tempCachePath = GetTempCachePath();
-                    LiveLinkMsg.LogInfo($"ReceiveSubSceneHeader => {subSceneAsset.SubSceneGUID} | {subSceneAsset.TargetHash}, '{tempCachePath}' => '{headerPath}'");
-                    
-                    var stream = File.OpenWrite(tempCachePath);
-                    stream.Write(args.data, reader.Offset, args.data.Length - reader.Offset);
-                    stream.Close();
-                    stream.Dispose();
-                    
-                    try
-                    {
-                        File.Move(tempCachePath, headerPath);
-                    }
-                    catch (Exception e)
-                    {
-                        File.Delete(tempCachePath);
-                        if (!File.Exists(headerPath))
-                        {
-                            Debug.LogError($"Failed to move temporary file. Exception: {e.Message}");
-                            LiveLinkMsg.LogInfo($"Failed to move temporary file. Exception: {e.Message}");
-                        }
-                    }
-                }
-                
-                if (!_WaitingForSubScenes.ContainsKey(subSceneAsset.SubSceneGUID))
-                {
-                    Debug.LogError($"Received {subSceneAsset.SubSceneGUID} | {subSceneAsset.TargetHash} without requesting it");
-                    LiveLinkMsg.LogInfo($"Received {subSceneAsset.SubSceneGUID} | {subSceneAsset.TargetHash} without requesting it");
-                    return;
-                }
-
-                var waitingSubScene = _WaitingForSubScenes[subSceneAsset.SubSceneGUID];
-                waitingSubScene.TargetHash = subSceneAsset.TargetHash;
-                waitingSubScene.SubSectionCount = subSectionCount;
-                _WaitingForSubScenes[subSceneAsset.SubSceneGUID] = waitingSubScene;
-            }
-        }
-        
-        unsafe void ReceiveEntityBinaryFile(MessageEventArgs args)
-        {
-            fixed (byte* ptr = args.data)
-            {
-                var reader = new UnsafeAppendBuffer.Reader(ptr, args.data.Length);
-                var subSceneAsset = reader.ReadNext<ResolvedSubSceneID>();
-                var sectionIndex = reader.ReadNext<int>();
-                var ebfPath = EntityScenesPaths.GetLiveLinkCachePath(subSceneAsset.TargetHash, EntityScenesPaths.PathType.EntitiesBinary, sectionIndex);
-                
-                // Not printing error because this can happen when running the same player multiple times on the same machine
-                if (File.Exists(ebfPath))
-                {
-                    LiveLinkMsg.LogInfo($"Received {subSceneAsset.SubSceneGUID} | {sectionIndex} | {subSceneAsset.TargetHash} but it already exists on disk");
-                }
-                else
-                {
-                    var tempCachePath = GetTempCachePath();
-                    LiveLinkMsg.LogInfo($"ReceiveEntityBinaryFile => {subSceneAsset.SubSceneGUID} | {sectionIndex} | {subSceneAsset.TargetHash}, '{tempCachePath}' => '{ebfPath}'");
-                    
-                    var stream = File.OpenWrite(tempCachePath);
-                    stream.Write(args.data, reader.Offset, args.data.Length - reader.Offset);
-                    stream.Close();
-                    stream.Dispose();
-                    
-                    try
-                    {
-                        File.Move(tempCachePath, ebfPath);
-                    }
-                    catch (Exception e)
-                    {
-                        File.Delete(tempCachePath);
-                        if (!File.Exists(ebfPath))
-                        {
-                            Debug.LogError($"Failed to move temporary file. Exception: {e.Message}");
-                            LiveLinkMsg.LogInfo($"Failed to move temporary file. Exception: {e.Message}");
-                        }
-                    }
-                }
-                
-                if (!_WaitingForSubScenes.ContainsKey(subSceneAsset.SubSceneGUID))
-                {
-                    Debug.LogError($"Received {subSceneAsset.SubSceneGUID} | {sectionIndex} | {subSceneAsset.TargetHash} without requesting it");
-                    LiveLinkMsg.LogInfo($"Received {subSceneAsset.SubSceneGUID} | {sectionIndex} | {subSceneAsset.TargetHash} without requesting it");
-                }
+                AddWaitForSubScene(subSceneId, runtimeGlobalObjectIds);
             }
         }
 
         //@TODO: Support some sort of transaction like API so we can reload all changed things in batch.
-        unsafe void ReceiveAssetBundle(MessageEventArgs args)
+        unsafe void ReceiveAsset(MessageEventArgs args)
         {
             LiveLinkMsg.LogReceived($"AssetBundle: '{args.data.Length}' bytes");
 
-            fixed (byte* ptr = args.data)
+            fixed(byte* ptr = args.data)
             {
                 var reader = new UnsafeAppendBuffer.Reader(ptr, args.data.Length);
                 var asset = reader.ReadNext<ResolvedAssetID>();
                 var assetBundleCachePath = GetCachePath(asset.TargetHash);
-                
+
                 // Not printing error because this can happen when running the same player multiple times on the same machine
                 if (File.Exists(assetBundleCachePath))
                 {
@@ -298,11 +211,9 @@ namespace Unity.Scenes
                     // cache: if not in cache, write actual file to Application.persistentDatapath
                     var tempCachePath = GetTempCachePath();
                     LiveLinkMsg.LogInfo($"ReceiveAssetBundle => {asset.GUID} | {asset.TargetHash}, '{tempCachePath}' => '{assetBundleCachePath}'");
-                    
-                    var stream = File.OpenWrite(tempCachePath);
-                    stream.Write(args.data, reader.Offset, args.data.Length - reader.Offset);
-                    stream.Close();
-                    stream.Dispose();
+
+                    using (var stream = File.OpenWrite(tempCachePath))
+                        stream.Write(args.data, reader.Offset, args.data.Length - reader.Offset);
 
                     try
                     {
@@ -319,13 +230,12 @@ namespace Unity.Scenes
                     }
                 }
 
-                if (!_WaitingForAssets.ContainsKey(asset.GUID))
+                if (!m_WaitingForAssets.ContainsKey(asset.GUID))
                 {
-                    Debug.LogError($"Received {asset.GUID} | {asset.TargetHash} without requesting it");
                     LiveLinkMsg.LogInfo($"Received {asset.GUID} | {asset.TargetHash} without requesting it");
                 }
 
-                _WaitingForAssets[asset.GUID] = asset.TargetHash;
+                m_WaitingForAssets[asset.GUID] = asset.TargetHash;
             }
         }
 
@@ -346,22 +256,35 @@ namespace Unity.Scenes
                 var assetBundleCachePath = GetCachePath(targetHash);
 
                 //if we already loaded an asset bundle and we just need a refresh
-                var oldAssetBundle = _GlobalAssetObjectResolver.GetAssetBundle(assetGUID);
+                var oldAssetBundle = globalAssetObjectResolver.GetAssetBundle(assetGUID);
                 if (oldAssetBundle != null)
                 {
-                    LiveLinkMsg.LogInfo($"patching asset bundle: {assetGUID}");
+                    if (oldAssetBundle.isStreamedSceneAssetBundle)
+                    {
+                        LiveLinkMsg.LogInfo($"Unloading scene bundle: {assetGUID}");
+                        var sceneSystem = World.GetExistingSystem<SceneSystem>();
+                        if (sceneSystem != null)
+                            sceneSystem.ReloadScenesWithHash(assetGUID, targetHash);
+                        globalAssetObjectResolver.UnloadAsset(assetGUID);
+                        continue;
+                    }
+                    else
+                    {
+                        LiveLinkMsg.LogInfo($"patching asset bundle: {assetGUID}");
 
-                    patchAssetBundles.Add(oldAssetBundle);
-                    patchAssetBundlesPath.Add(assetBundleCachePath);
+                        patchAssetBundles.Add(oldAssetBundle);
+                        patchAssetBundlesPath.Add(assetBundleCachePath);
 
-                    _GlobalAssetObjectResolver.UpdateTargetHash(assetGUID, targetHash);
+                        globalAssetObjectResolver.UpdateTargetHash(assetGUID, targetHash);
+                        newAssetBundles.Add(assetGUID);
+                    }
                 }
                 else
                 {
                     LiveLinkMsg.LogInfo($"Loaded asset bundle: {assetGUID}");
 
                     var loadedAssetBundle = AssetBundle.LoadFromFile(assetBundleCachePath);
-                    _GlobalAssetObjectResolver.AddAsset(assetGUID, targetHash, null, loadedAssetBundle);
+                    globalAssetObjectResolver.AddAsset(assetGUID, targetHash, null, loadedAssetBundle);
                     newAssetBundles.Add(assetGUID);
                 }
 
@@ -380,117 +303,87 @@ namespace Unity.Scenes
 
             foreach (var assetGUID in newAssetBundles)
             {
-                var assetBundle = _GlobalAssetObjectResolver.GetAssetBundle(assetGUID);
+                var assetBundle = globalAssetObjectResolver.GetAssetBundle(assetGUID);
                 if (assetBundle == null)
                 {
                     Debug.LogError($"Could not load requested asset bundle.'");
                     return;
                 }
 
-                var loadedManifest = assetBundle.LoadAsset<AssetObjectManifest>(assetGUID.ToString());
-                if (loadedManifest == null)
+                if (!assetBundle.isStreamedSceneAssetBundle)
                 {
-                    Debug.LogError($"Loaded {assetGUID} failed to load ObjectManifest");
-                    return;
-                }
+                    var loadedManifest = assetBundle.LoadAsset<AssetObjectManifest>(assetGUID.ToString());
+                    if (loadedManifest == null)
+                    {
+                        Debug.LogError($"Loaded {assetGUID} failed to load ObjectManifest");
+                        return;
+                    }
 
-                _GlobalAssetObjectResolver.UpdateObjectManifest(assetGUID, loadedManifest);
+                    globalAssetObjectResolver.UpdateObjectManifest(assetGUID, loadedManifest);
+                }
             }
 
-            foreach(var assetGUID in assetBundleToValidate)
-                _GlobalAssetObjectResolver.Validate(assetGUID);
+            foreach (var assetGUID in assetBundleToValidate)
+                globalAssetObjectResolver.Validate(assetGUID);
 
             LiveLinkMsg.LogInfo("--- End Load asset bundles");
         }
 
-        unsafe void ReceiveResponseSubSceneTargetHash(MessageEventArgs args)
+        unsafe void ReceiveSubSceneTargetHash(MessageEventArgs args)
         {
             using (var subSceneAssets = args.ReceiveArray<ResolvedSubSceneID>())
             {
-                foreach(var subSceneAsset in subSceneAssets)
+                foreach (var subSceneAsset in subSceneAssets)
                 {
-                    if (_WaitingForSubScenes.ContainsKey(subSceneAsset.SubSceneGUID))
+                    if (m_WaitingForSubScenes.ContainsKey(subSceneAsset.SubSceneGUID))
                         return;
 
-                    var headerPath = EntityScenesPaths.GetLiveLinkCachePath(subSceneAsset.TargetHash, EntityScenesPaths.PathType.EntitiesHeader, -1);
-                    
-                    if (File.Exists(headerPath))
+                    // If subscene exists locally already, just load it
+                    var assetDependencies = new HashSet<RuntimeGlobalObjectId>();
+                    if (IsSubSceneAvailable(subSceneAsset, assetDependencies))
                     {
-                        LiveLinkMsg.LogInfo($"ReceiveResponseSubSceneTargetHash => {subSceneAsset.SubSceneGUID} | {subSceneAsset.TargetHash}, File.Exists => 'True', {Path.GetFullPath(headerPath)}");
-                        
-                        //TODO: This is a hack to make sure assets are managed by asset manifest when loading from cache for first run
-                        if (!BlobAssetReference<SceneMetaData>.TryRead(headerPath, SceneMetaDataSerializeUtility.CurrentFileFormatVersion, out var sceneMetaDataRef))
-                        {
-                            Debug.LogError("Loading Entity Scene failed because the entity header file was an old version: " + subSceneAsset.SubSceneGUID);
-                            return;
-                        }
-                        
-                        ref var sceneMetaData = ref sceneMetaDataRef.Value;
-                        
-                        var waitingSubScene = new WaitingSubScene
-                        {
-                            TargetHash = subSceneAsset.TargetHash,
-                            SubSections = new List<NativeArray<RuntimeGlobalObjectId>>(),
-                            SubSectionCount = sceneMetaData.Sections.Length
-                        };
-                        
-                        for (int i = 0; i < sceneMetaData.Sections.Length; i++)
-                        {
-                            if (sceneMetaData.Sections[i].ObjectReferenceCount != 0)
-                            {
-                                var refObjGUIDsPath = EntityScenesPaths.GetLiveLinkCachePath(subSceneAsset.TargetHash, EntityScenesPaths.PathType.EntitiesUnityObjectReferences, i);
-                                using (var reader = new StreamBinaryReader(refObjGUIDsPath))
-                                {
-                                    var numObjRefGUIDs = reader.ReadInt();
-                                    NativeArray<RuntimeGlobalObjectId> objRefGUIDs = new NativeArray<RuntimeGlobalObjectId>(numObjRefGUIDs, Allocator.Persistent);
-                                    reader.ReadArray(objRefGUIDs, numObjRefGUIDs);
-                                    waitingSubScene.SubSections.Add(objRefGUIDs);
-                                }
-                            }
-                            else
-                            {
-                                waitingSubScene.SubSections.Add(new NativeArray<RuntimeGlobalObjectId>(0, Allocator.Persistent));
-                            }
-                        }
+                        LiveLinkMsg.LogInfo($"ReceiveResponseSubSceneTargetHash => {subSceneAsset.SubSceneGUID} | {subSceneAsset.TargetHash}, File.Exists => 'True'");
 
-                        _WaitingForSubScenes[subSceneAsset.SubSceneGUID] = waitingSubScene;
+                        //TODO: This is a hack to make sure assets are managed by asset manifest when loading from cache for first run
+                        AddWaitForSubScene(subSceneAsset, assetDependencies);
                     }
                     else
                     {
-                        LiveLinkMsg.LogInfo($"ReceiveResponseSubSceneTargetHash => {subSceneAsset.SubSceneGUID} | {subSceneAsset.TargetHash}, File.Exists => 'False', {Path.GetFullPath(headerPath)}");
-
-                        _WaitingForSubScenes[subSceneAsset.SubSceneGUID] = new WaitingSubScene
-                        {
-                            TargetHash = new Hash128(),
-                            SubSections = new List<NativeArray<RuntimeGlobalObjectId>>(),
-                            SubSectionCount = 0
-                        };
-
-                        PlayerConnection.instance.Send(LiveLinkMsg.RequestSubSceneForGUID, subSceneAsset);
+                        LiveLinkMsg.LogInfo($"ReceiveResponseSubSceneTargetHash => {subSceneAsset.SubSceneGUID} | {subSceneAsset.TargetHash}, File.Exists => 'False'");
+                        m_Connection.Send(LiveLinkMsg.PlayerRequestSubSceneForGUID, subSceneAsset);
                     }
                 }
             }
         }
 
-        unsafe void ReceiveResponseAssetBundleTargetHash(MessageEventArgs args)
+        unsafe void ReceiveAssetTargetHash(MessageEventArgs args)
         {
             using (var resolvedAssets = args.ReceiveArray<ResolvedAssetID>())
             {
-                foreach(var asset in resolvedAssets)
+                foreach (var asset in resolvedAssets)
                 {
-                    //TODO: Should we compare against already loaded assets here?
-                    if (File.Exists(GetCachePath(asset.TargetHash)))
+                    if (!asset.TargetHash.IsValid)
                     {
-                        LiveLinkMsg.LogReceived($"AssetBundleTargetHash => {asset.GUID} | {asset.TargetHash}, File.Exists => 'True'");
-                        _WaitingForAssets[asset.GUID] = asset.TargetHash;
+                        // If hash is invalid, then it means we should be waiting on it, but the hash will come later when it finishes importing on the editor
+                        LiveLinkMsg.LogReceived($"ReceiveAssetTargetHash => {asset.GUID} | {asset.TargetHash}, Invalid Hash (Still waiting)");
+                        m_WaitingForAssets[asset.GUID] = new Hash128();
                     }
                     else
                     {
-                        LiveLinkMsg.LogReceived($"AssetBundleTargetHash => {asset.GUID} | {asset.TargetHash}, File.Exists => 'False'");
-                        _WaitingForAssets[asset.GUID] = new Hash128();
+                        //TODO: Should we compare against already loaded assets here?
+                        if (File.Exists(GetCachePath(asset.TargetHash)))
+                        {
+                            LiveLinkMsg.LogReceived($"ReceiveAssetTargetHash => {asset.GUID} | {asset.TargetHash}, File.Exists => 'True'");
+                            m_WaitingForAssets[asset.GUID] = asset.TargetHash;
+                        }
+                        else
+                        {
+                            LiveLinkMsg.LogReceived($"ReceiveAssetTargetHash => {asset.GUID} | {asset.TargetHash}, File.Exists => 'False'");
+                            m_WaitingForAssets[asset.GUID] = new Hash128();
 
-                        LiveLinkMsg.LogSend($"AssetBundleBuild request '{asset.GUID}'");
-                        PlayerConnection.instance.Send(LiveLinkMsg.RequestAssetBundleForGUID, asset.GUID);
+                            LiveLinkMsg.LogSend($"AssetBundleBuild request '{asset.GUID}'");
+                            m_Connection.Send(LiveLinkMsg.PlayerRequestAssetForGUID, asset.GUID);
+                        }
                     }
                 }
             }
@@ -498,78 +391,155 @@ namespace Unity.Scenes
 
         public bool IsSubSceneReady(SubSceneGUID subSceneGUID)
         {
-            if (!_TrackedSubScenes.TryGetValue(subSceneGUID, out var targetHash))
+            if (!TrackedSubScenes.TryGetValue(subSceneGUID, out var targetHash))
             {
                 return false;
             }
-            
-            return (targetHash != new Hash128());
+
+            return targetHash.IsValid;
         }
-        
+
+        unsafe bool IsSubSceneAvailable(in ResolvedSubSceneID subSceneId, HashSet<RuntimeGlobalObjectId> assetDependencies = null)
+        {
+            var headerPath = EntityScenesPaths.GetLiveLinkCachePath(subSceneId.TargetHash, EntityScenesPaths.PathType.EntitiesHeader, -1);
+            if (!File.Exists(headerPath))
+            {
+                LiveLinkMsg.LogInfo($"Missing SubScene header! {headerPath}");
+                return false;
+            }
+
+            if (!BlobAssetReference<SceneMetaData>.TryRead(headerPath, SceneMetaDataSerializeUtility.CurrentFileFormatVersion, out var sceneMetaDataRef))
+            {
+                Debug.LogError("Loading Entity Scene failed because the entity header file was an old version: " + subSceneId.SubSceneGUID);
+                return false;
+            }
+
+            ref SceneMetaData sceneMetaData = ref sceneMetaDataRef.Value;
+            for (int i = 0; i < sceneMetaData.Sections.Length; i++)
+            {
+                var sectionIndex = sceneMetaData.Sections[i].SubSectionIndex;
+                var ebfPath = EntityScenesPaths.GetLiveLinkCachePath(subSceneId.TargetHash, EntityScenesPaths.PathType.EntitiesBinary, sectionIndex);
+                if (!File.Exists(headerPath))
+                {
+                    LiveLinkMsg.LogInfo($"Missing Entity binary file! {ebfPath}");
+                    return false;
+                }
+
+                if (sceneMetaData.Sections[i].ObjectReferenceCount != 0)
+                {
+                    var refObjGuidsPath = EntityScenesPaths.GetLiveLinkCachePath(subSceneId.TargetHash, EntityScenesPaths.PathType.EntitiesUnityObjectRefGuids, sectionIndex);
+                    if (!File.Exists(refObjGuidsPath))
+                    {
+                        LiveLinkMsg.LogInfo($"Missing Entity refObjGuids file! {refObjGuidsPath}");
+                        return false;
+                    }
+
+                    var assetBundlePath = EntityScenesPaths.GetLiveLinkCachePath(subSceneId.TargetHash, EntityScenesPaths.PathType.EntitiesUnitObjectReferencesBundle, sectionIndex);
+                    if (!File.Exists(assetBundlePath))
+                    {
+                        LiveLinkMsg.LogInfo($"Missing Entity AssetBundle file! {assetBundlePath}");
+                        return false;
+                    }
+
+                    if (assetDependencies != null)
+                    {
+                        using (var data = new NativeArray<byte>(File.ReadAllBytes(refObjGuidsPath), Allocator.Temp))
+                        using (var reader = new MemoryBinaryReader((byte*)data.GetUnsafePtr()))
+                        {
+                            var numObjRefGUIDs = reader.ReadInt();
+                            var objRefGUIDs = new NativeArray<RuntimeGlobalObjectId>(numObjRefGUIDs, Allocator.Temp);
+                            reader.ReadArray(objRefGUIDs, numObjRefGUIDs);
+
+                            foreach (var runtimeGlobalObjectId in objRefGUIDs)
+                            {
+                                assetDependencies.Add(runtimeGlobalObjectId);
+                            }
+                        }
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        void AddWaitForSubScene(in ResolvedSubSceneID subSceneId, HashSet<RuntimeGlobalObjectId> assetDependencies)
+        {
+            var runtimeGlobalObjectIds = new NativeArray<RuntimeGlobalObjectId>(assetDependencies.Count, Allocator.Persistent);
+            int j = 0;
+            foreach (var asset in assetDependencies)
+                runtimeGlobalObjectIds[j++] = asset;
+
+            AddWaitForSubScene(subSceneId, runtimeGlobalObjectIds);
+        }
+
+        void AddWaitForSubScene(in ResolvedSubSceneID subSceneId, NativeArray<RuntimeGlobalObjectId> assetDependencies)
+        {
+            if (m_WaitingForSubScenes.ContainsKey(subSceneId.SubSceneGUID))
+            {
+                Debug.LogError("Adding SubScene to waiting that we are already waiting for!");
+                return;
+            }
+
+            var waitingSubScene = new WaitingSubScene {TargetHash = subSceneId.TargetHash, RuntimeGlobalObjectIds = assetDependencies};
+
+            m_WaitingForSubScenes[subSceneId.SubSceneGUID] = waitingSubScene;
+            LiveLinkMsg.LogInfo($"AddWaitForSubScene => SubScene added to waiting list. {subSceneId.TargetHash}");
+        }
+
         protected override void OnUpdate()
         {
             // Request any new guids that we haven't seen yet from the editor
-            using (var requestedGuids = _ResourceRequests.ToComponentDataArray<ResourceGUID>(Allocator.TempJob))
+            using (var requestedGuids = m_ResourceRequests.ToComponentDataArray<ResourceGUID>(Allocator.TempJob))
             {
                 if (requestedGuids.Length > 0)
                 {
-                    EntityManager.AddComponent(_ResourceRequests, typeof(ResourceRequested));
+                    EntityManager.AddComponent(m_ResourceRequests, typeof(ResourceRequested));
                     LiveLinkMsg.LogSend($"AssetBundleTargetHash request {requestedGuids.Reinterpret<Hash128>().ToDebugString()}");
-                    PlayerConnection.instance.SendArray(LiveLinkMsg.RequestAssetBundleTargetHash, requestedGuids);
+                    m_Connection.SendArray(LiveLinkMsg.PlayerRequestAssetTargetHash, requestedGuids);
                 }
             }
-            
+
             // Request any new subscenes that we haven't seen yet from the editor
-            using (var requestedSubScenes = _SubSceneAssetRequests.ToComponentDataArray<SubSceneGUID>(Allocator.TempJob))
+            using (var requestedSubScenes = m_SubSceneAssetRequests.ToComponentDataArray<SubSceneGUID>(Allocator.TempJob))
             {
                 if (requestedSubScenes.Length > 0)
                 {
-                    EntityManager.AddComponent(_SubSceneAssetRequests, typeof(SubSceneRequested));
-                    PlayerConnection.instance.SendArray(LiveLinkMsg.RequestSubSceneTargetHash, requestedSubScenes);
+                    EntityManager.AddComponent(m_SubSceneAssetRequests, typeof(SubSceneRequested));
+                    m_Connection.SendArray(LiveLinkMsg.PlayerRequestSubSceneTargetHash, requestedSubScenes);
                 }
             }
 
             // * Ensure all assets we are waiting for have arrived.
             // * LoadAll asset bundles in one go when everything is ready
-            if (_WaitingForAssets.Count != 0)
+            if (m_WaitingForAssets.Count != 0)
             {
                 bool hasAllAssets = true;
-                var assets = new NativeArray<ResolvedAssetID>(_WaitingForAssets.Count, Allocator.TempJob);
+                var assets = new NativeArray<ResolvedAssetID>(m_WaitingForAssets.Count, Allocator.TempJob);
                 int o = 0;
-                foreach (var asset in _WaitingForAssets)
+                foreach (var asset in m_WaitingForAssets)
                 {
-                    if (asset.Value == new Hash128())
-                        hasAllAssets = false;
+                    hasAllAssets &= asset.Value.IsValid;
                     assets[o++] = new ResolvedAssetID { GUID = asset.Key, TargetHash = asset.Value };
                 }
 
                 if (hasAllAssets)
                 {
                     LoadAssetBundles(assets);
-                    _WaitingForAssets.Clear();
+                    m_WaitingForAssets.Clear();
                 }
 
                 assets.Dispose();
             }
 
-            if (_WaitingForSubScenes.Count != 0)
+            if (m_WaitingForSubScenes.Count != 0)
             {
                 bool hasAllSubScenes = true;
-                foreach (var subScene in _WaitingForSubScenes)
+                var liveLinkPlayerSystem = World.GetExistingSystem<LiveLinkPlayerSystem>();
+                foreach (var subScene in m_WaitingForSubScenes)
                 {
                     bool hasSubScene = subScene.Value.TargetHash.IsValid;
-
-                    if (subScene.Value.SubSectionCount != subScene.Value.SubSections.Count)
-                        hasSubScene = false;
-
-                    foreach (var subSection in subScene.Value.SubSections)
-                    {
-                        if(!World.GetExistingSystem<LiveLinkPlayerSystem>().IsResourceReady(subSection))
-                        {
-                            hasSubScene = false;
-                            break;
-                        }
-                    }
+                    if (hasSubScene)
+                        hasSubScene = liveLinkPlayerSystem.IsResourceReady(subScene.Value.RuntimeGlobalObjectIds);
 
                     if (!hasSubScene)
                     {
@@ -577,33 +547,32 @@ namespace Unity.Scenes
                         break;
                     }
 
-                    _TrackedSubScenes[subScene.Key] = subScene.Value.TargetHash;
+                    TrackedSubScenes[subScene.Key] = subScene.Value.TargetHash;
                 }
 
                 if (hasAllSubScenes)
                 {
-                    foreach (var subScene in _WaitingForSubScenes)
-                        foreach (var subSection in subScene.Value.SubSections)
-                            subSection.Dispose();
+                    foreach (var subScene in m_WaitingForSubScenes)
+                        subScene.Value.RuntimeGlobalObjectIds.Dispose();
 
-                    _WaitingForSubScenes.Clear();
+                    m_WaitingForSubScenes.Clear();
                 }
             }
         }
 
         public static void Reset()
         {
-            _GlobalAssetObjectResolver.DisposeAssetBundles();
-            _GlobalAssetObjectResolver = new GlobalAssetObjectResolver();
+            globalAssetObjectResolver.DisposeAssetBundles();
+            globalAssetObjectResolver = new GlobalAssetObjectResolver();
 
-            foreach (var world in World.AllWorlds)
+            foreach (var world in World.All)
             {
                 var system = world.GetExistingSystem<LiveLinkPlayerAssetRefreshSystem>();
                 if (system != null)
                 {
-                    system._WaitingForAssets.Clear();
-                    system._WaitingForSubScenes.Clear();
-                    system._TrackedSubScenes.Clear();
+                    system.m_WaitingForAssets.Clear();
+                    system.m_WaitingForSubScenes.Clear();
+                    system.TrackedSubScenes.Clear();
                 }
             }
         }

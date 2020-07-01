@@ -11,6 +11,7 @@ namespace Unity.Entities.Tests
         {
             public EntityQuery m_Group;
 
+#pragma warning disable 618
             struct UpdateData : IJobForEach<EcsTestData, EcsTestData2>
             {
                 public void Execute(ref EcsTestData data, ref EcsTestData2 data2)
@@ -21,7 +22,7 @@ namespace Unity.Entities.Tests
 
             protected override void OnUpdate()
             {
-                var updateDataJob = new UpdateData{};
+                var updateDataJob = new UpdateData {};
                 var updateDataJobHandle = updateDataJob.Schedule(m_Group);
                 updateDataJobHandle.Complete();
             }
@@ -32,6 +33,7 @@ namespace Unity.Entities.Tests
                     ComponentType.ReadWrite<EcsTestData2>());
             }
         }
+#pragma warning restore 618
 #endif
 
         class BumpVersionSystem : ComponentSystem
@@ -108,7 +110,7 @@ namespace Unity.Entities.Tests
                 m_LastAllChanged = true;
                 for (int i = 0; i < chunks.Length; i++)
                 {
-                    m_LastAllChanged &= chunks[i].DidChange(ecsTestDataType,LastSystemVersion);
+                    m_LastAllChanged &= chunks[i].DidChange(ecsTestDataType, LastSystemVersion);
                 }
 
                 chunks.Dispose();
@@ -155,6 +157,7 @@ namespace Unity.Entities.Tests
             system.Update();
             Assert.AreNotEqual(0, system.LastSystemVersion);
         }
+
 #endif
     }
 }

@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.ComponentModel;
 using System.IO;
 #if UNITY_EDITOR
 using AssetImportContext = UnityEditor.Experimental.AssetImporters.AssetImportContext;
@@ -15,20 +17,21 @@ namespace Unity.Entities
         public Hash128                  SceneGUID;
         public string                   DebugConversionName = "";
         public ConversionFlags          ConversionFlags;
-        #if UNITY_EDITOR
-        public Build.BuildSettings      BuildSettings;
+#if UNITY_EDITOR
+        public Build.BuildConfiguration BuildConfiguration;
         public AssetImportContext       AssetImportContext;
-        #endif
-
+#endif
+        public WorldSystemFilterFlags FilterFlags = WorldSystemFilterFlags.GameObjectConversion;
         // not carried forward into a fork
         public Type[]                   ExtraSystems = Array.Empty<Type>();
+        public List<Type>               Systems;
         public byte                     NamespaceID;
         public Action<World>            ConversionWorldCreated;        // get a callback right after the conversion world is created and systems have been added to it (good for tests that want to inject something)
         public Action<World>            ConversionWorldPreDispose;     // get a callback right before the conversion world gets disposed (good for tests that want to validate world contents)
 
         public BlobAssetStore BlobAssetStore { get; protected internal set; }
-        
-        public GameObjectConversionSettings() { }
+
+        public GameObjectConversionSettings() {}
 
         // not a clone - only copies what makes sense for creating entities into a separate guid namespace
         public GameObjectConversionSettings Fork(byte entityGuidNamespaceID)
@@ -44,16 +47,16 @@ namespace Unity.Entities
                 ConversionFlags = ConversionFlags,
                 NamespaceID = entityGuidNamespaceID,
                 BlobAssetStore = BlobAssetStore,
-                #if UNITY_EDITOR
-                BuildSettings = BuildSettings,
+#if UNITY_EDITOR
+                BuildConfiguration = BuildConfiguration,
                 AssetImportContext = AssetImportContext,
-                #endif
+#endif
             };
         }
 
         // ** CONFIGURATION **
 
-        public GameObjectConversionSettings(World destinationWorld, ConversionFlags conversionFlags, BlobAssetStore blobAssetStore=null)
+        public GameObjectConversionSettings(World destinationWorld, ConversionFlags conversionFlags, BlobAssetStore blobAssetStore = null)
         {
             DestinationWorld = destinationWorld;
             ConversionFlags = conversionFlags;
@@ -65,30 +68,15 @@ namespace Unity.Entities
 
         public static GameObjectConversionSettings FromWorld(World destinationWorld, BlobAssetStore blobAssetStore) => new GameObjectConversionSettings { DestinationWorld = destinationWorld, BlobAssetStore = blobAssetStore};
         public static GameObjectConversionSettings FromHash(Hash128 hash, BlobAssetStore blobAssetStore) => new GameObjectConversionSettings { SceneGUID = hash, BlobAssetStore = blobAssetStore};
-#if UNITY_EDITOR
+    #if UNITY_EDITOR
         public static GameObjectConversionSettings FromGUID(UnityEditor.GUID guid, BlobAssetStore blobAssetStore) => new GameObjectConversionSettings { SceneGUID = guid, BlobAssetStore = blobAssetStore};
-#endif
-        
-        [Obsolete("GameObjectConversionSettings.implicit operator(World) is deprecated, use GameObjectConversionSettings.FromWorld() instead. (RemovedAfter 2020-02-20)")]
-        public static implicit operator GameObjectConversionSettings(World destinationWorld)
-            => new GameObjectConversionSettings { DestinationWorld = destinationWorld };
-
-        [Obsolete("GameObjectConversionSettings.implicit operator(Hash128) is deprecated, use GameObjectConversionSettings.FromHash() instead. (RemovedAfter 2020-02-20)")]
-        public static implicit operator GameObjectConversionSettings(Hash128 sceneGuid)
-            => new GameObjectConversionSettings { SceneGUID = sceneGuid };
-
-        #if UNITY_EDITOR
-        [Obsolete("GameObjectConversionSettings.implicit operator(UnityEditor.GUID) is deprecated, use GameObjectConversionSettings.FromGUID() instead. (RemovedAfter 2020-02-20)")]
-        public static implicit operator GameObjectConversionSettings(UnityEditor.GUID sceneGuid)
-            => new GameObjectConversionSettings { SceneGUID = sceneGuid };
-        #endif
+    #endif
 
         // use this to inject systems into the conversion world (good for testing)
         public GameObjectConversionSettings WithExtraSystems(params Type[] extraSystems)
         {
             if (ExtraSystems != null && ExtraSystems.Length > 0)
                 throw new InvalidOperationException($"{nameof(ExtraSystems)} already initialized");
-
             ExtraSystems = extraSystems;
             return this;
         }
@@ -103,16 +91,15 @@ namespace Unity.Entities
             => WithExtraSystems(typeof(T1), typeof(T2), typeof(T3));
 
         // ** CONVERSION **
-        
+
         public World CreateConversionWorld()
             => GameObjectConversionUtility.CreateConversionWorld(this);
 
-        
         // ** EXPORTING **
-        
+
         public bool SupportsExporting
-            => GetType() == typeof(GameObjectConversionSettings); 
-        
+            => GetType() == typeof(GameObjectConversionSettings);
+
         public virtual Guid GetGuidForAssetExport(UnityObject uobject)
         {
             if (uobject == null)

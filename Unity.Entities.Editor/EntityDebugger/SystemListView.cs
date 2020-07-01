@@ -1,4 +1,4 @@
-﻿using UnityEditor.IMGUI.Controls;
+using UnityEditor.IMGUI.Controls;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
@@ -33,7 +33,7 @@ namespace Unity.Entities.Editor
             {
                 if (frameCount > 0)
                 {
-                    lastReading = (totalNanoseconds/1e6f) / frameCount;
+                    lastReading = (totalNanoseconds / 1e6f) / frameCount;
                     frameCount = totalNanoseconds = 0;
                 }
 
@@ -152,11 +152,12 @@ namespace Unity.Entities.Editor
         HideNode CreateNodeForSystem(int id, ComponentSystemBase system)
         {
             var active = true;
+            var type = system.GetType();
             if (!(system is ComponentSystemGroup))
             {
                 systemsById.Add(id, system);
                 worldsById.Add(id, system.World);
-                var recorder = Recorder.Get($"{system.World?.Name ?? "none"} {system.GetType().FullName}");
+                var recorder = Recorder.Get($"{system.World?.Name ?? "none"} {type.FullName}");
                 if (!recordersBySystem.ContainsKey(system))
                     recordersBySystem.Add(system, new AverageRecorder(recorder));
                 else
@@ -166,7 +167,13 @@ namespace Unity.Entities.Editor
                 recorder.enabled = true;
                 active = false;
             }
-            var name = getWorldSelection() == null ? $"{system.GetType().Name} ({system.World?.Name ?? "none"})" : system.GetType().Name;
+            string typeName;
+            if (type.IsNested)
+                typeName = type.DeclaringType.Name + "." + type.Name;
+            else
+                typeName = type.Name;
+
+            var name = getWorldSelection() == null ? $"{typeName} ({system.World?.Name ?? "none"})" : typeName;
             var item = new TreeViewItem { id = id, displayName = name };
 
             var hideNode = new HideNode(item) { Active = active };
@@ -210,7 +217,6 @@ namespace Unity.Entities.Editor
                         }
                     }
                     return Item;
-
                 }
                 else
                 {
@@ -296,7 +302,7 @@ namespace Unity.Entities.Editor
                         return CreateNodeForSystem(currentId++, system);
                     }
                 }
-                    break;
+                break;
             }
 
             return null;
@@ -311,10 +317,10 @@ namespace Unity.Entities.Editor
 
             var currentID = kAllEntitiesItemId + 1;
 
-            lastPlayerLoop = ScriptBehaviourUpdateOrder.CurrentPlayerLoop;
+            lastPlayerLoop = PlayerLoop.GetCurrentPlayerLoop();
 
-            rootNode = BuildNodesForPlayerLoopSystem(ScriptBehaviourUpdateOrder.CurrentPlayerLoop, ref currentID)
-                       ?? new HideNode(new TreeViewItem {id = currentID, displayName = "Root"});
+            rootNode = BuildNodesForPlayerLoopSystem(lastPlayerLoop, ref currentID)
+                ?? new HideNode(new TreeViewItem {id = currentID, displayName = "Root"});
 
             if (EntityDebugger.extraSystems != null)
             {
@@ -324,7 +330,6 @@ namespace Unity.Entities.Editor
                         AddNodeIgnoreNulls(ref rootNode.Children, BuildNodesForComponentSystem(system, ref currentID));
                 }
             }
-            return;
         }
 
         bool GetDefaultExpandedIds(HideNode parent, List<int> ids)
@@ -391,7 +396,7 @@ namespace Unity.Entities.Editor
             base.BeforeRowsGUI();
         }
 
-        protected override void RowGUI (RowGUIArgs args)
+        protected override void RowGUI(RowGUIArgs args)
         {
             if (args.item.depth == -1)
                 return;
@@ -428,7 +433,6 @@ namespace Unity.Entities.Editor
             }
             else if (args.item.id == kAllEntitiesItemId)
             {
-
             }
             else
             {
@@ -497,7 +501,7 @@ namespace Unity.Entities.Editor
         {
             get
             {
-                if (!PlayerLoopsMatch(lastPlayerLoop, ScriptBehaviourUpdateOrder.CurrentPlayerLoop))
+                if (!PlayerLoopsMatch(lastPlayerLoop, PlayerLoop.GetCurrentPlayerLoop()))
                     return true;
 
                 foreach (var world in worldsById.Values)

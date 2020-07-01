@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
 using UnityEngine;
@@ -7,7 +7,9 @@ namespace Unity.Entities
 {
     public static class EntityManagerExtensions
     {
+#pragma warning disable 618 // remove once ComponentDataProxyBase is removed
         static readonly List<ComponentDataProxyBase> s_ReusableComponentList = new List<ComponentDataProxyBase>(32);
+#pragma warning restore 618
 
         public static unsafe Entity Instantiate(this EntityManager entityManager, GameObject srcGameObject)
         {
@@ -33,19 +35,21 @@ namespace Unity.Entities
                 return;
 
             var entity = entityManager.Instantiate(srcGameObject);
-            outputEntities[0] = entity;
 
+            outputEntities[0] = entity;
             var entityPtr = (Entity*)outputEntities.GetUnsafePtr();
-            entityManager.InstantiateInternal(entity, entityPtr + 1, outputEntities.Length - 1);
+            entityManager.GetCheckedEntityDataAccess()->InstantiateInternal(entity, entityPtr + 1, outputEntities.Length - 1);
         }
 
         public static unsafe T GetComponentObject<T>(this EntityManager entityManager, Entity entity) where T : Component
         {
-            var componentType = ComponentType.ReadWrite<T>();
-            entityManager.EntityComponentStore->AssertEntityHasComponent(entity, componentType.TypeIndex);
+            var access = entityManager.GetCheckedEntityDataAccess();
+            var ecs = access->EntityComponentStore;
+            var mcs = access->ManagedComponentStore;
 
-            var entityInChunk = entityManager.EntityComponentStore->GetEntityInChunk(entity);
-            return (T) entityManager.ManagedComponentStore.GetManagedObject(entityInChunk.Chunk, componentType, entityInChunk.IndexInChunk);
+            var typeIndex = TypeManager.GetTypeIndex<T>();
+            var index = *access->GetManagedComponentIndex(entity, typeIndex);
+            return (T)mcs.GetManagedComponent(index);
         }
     }
 }

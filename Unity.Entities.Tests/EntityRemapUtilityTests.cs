@@ -10,9 +10,6 @@ namespace Unity.Entities.Tests
         [SetUp]
         public void Setup()
         {
-            // Redirect Log messages in NUnit which get swallowed (from GC invoking destructor in some cases)
-           // System.Console.SetOut(NUnit.Framework.TestContext.Out);
-
             m_Remapping = new NativeArray<EntityRemapUtility.EntityRemapInfo>(100, Allocator.Persistent);
         }
 
@@ -20,25 +17,18 @@ namespace Unity.Entities.Tests
         public void TearDown()
         {
             m_Remapping.Dispose();
-
-            // Restore output
-           // var standardOutput = new System.IO.StreamWriter(System.Console.OpenStandardOutput());
-          //  standardOutput.AutoFlush = true;
-           // System.Console.SetOut(standardOutput);
         }
 
         [Test]
         [Ignore("NOT IMPLEMENTED")]
         public void AddEntityRemappingThrowsForInvalidSource()
         {
-
         }
 
         [Test]
         [Ignore("NOT IMPLEMENTED")]
         public void RemapEntityThrowsForInvalidSource()
         {
-
         }
 
         [Test]
@@ -79,7 +69,8 @@ namespace Unity.Entities.Tests
 #else
             unsafe {
                 var info = TypeManager.GetTypeInfo(TypeManager.GetTypeIndex(type));
-                if (info.EntityOffsetCount > 0) {
+                if (info.EntityOffsetCount > 0)
+                {
                     TypeManager.EntityOffsetInfo[] ei = new TypeManager.EntityOffsetInfo[info.EntityOffsetCount];
                     for (var i = 0; i < info.EntityOffsetCount; ++i)
                         ei[i] = TypeManager.GetEntityOffsets(info)[i];
@@ -94,7 +85,7 @@ namespace Unity.Entities.Tests
         public void CalculateEntityOffsetsReturnsNullIfNoEntities()
         {
             var offsets = GetEntityOffsets(typeof(EmptyStruct));
-            Assert.AreEqual(null, offsets);
+            Assert.IsNull(offsets);
         }
 
         [Test]
@@ -104,7 +95,6 @@ namespace Unity.Entities.Tests
             Assert.AreEqual(1, offsets.Length);
             Assert.AreEqual(0, offsets[0].Offset);
         }
-
 
         struct TwoEntityStruct : IComponentData
         {
