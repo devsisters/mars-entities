@@ -2,11 +2,8 @@ using System;
 using System.Collections.Generic;
 using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
-using UnityEngine.Assertions;
-using Unity.Entities.Serialization;
-#if !NET_DOTS
-using Unity.Properties;
-#endif
+using Unity.Assertions;
+using Unity.Burst;
 
 namespace Unity.Entities
 {
@@ -18,10 +15,8 @@ namespace Unity.Entities
 
     internal unsafe class ManagedComponentStore
     {
-        struct ManagedArrayStorage
-        {
-            public object[] ManagedArray;
-        }
+        readonly ManagedObjectClone m_ManagedObjectClone = new ManagedObjectClone();
+        readonly ManagedObjectRemap m_ManagedObjectRemap = new ManagedObjectRemap();
 
         UnsafeMultiHashMap<int, int> m_HashLookup = new UnsafeMultiHashMap<int, int>(128, Allocator.Persistent);
 
@@ -37,17 +32,46 @@ namespace Unity.Entities
 
         UnsafeList m_SharedComponentInfo = new UnsafeList(Allocator.Persistent);
 
+        internal object[] m_ManagedComponentData = new object[64];
+
+        public void SetManagedComponentCapacity(int newCapacity)
+        {
+            Assert.IsTrue(m_ManagedComponentData.Length < newCapacity);
+            Array.Resize(ref m_ManagedComponentData, newCapacity);
+        }
+
+        public object GetManagedComponent(int index)
+        {
+            return m_ManagedComponentData[index];
+        }
+
         private SharedComponentInfo* SharedComponentInfoPtr
         {
-            get { return (SharedComponentInfo*) m_SharedComponentInfo.Ptr; }
+            get { return (SharedComponentInfo*)m_SharedComponentInfo.Ptr; }
         }
 
         int m_FreeListIndex;
 
-        ManagedArrayStorage[] m_ManagedArrays = new ManagedArrayStorage[0];
-
-        internal delegate bool InstantiateHybridComponentDelegate(object obj, ManagedComponentStore srcStore, Archetype* dstArch, ManagedComponentStore dstStore, int dstManagedArrayIndex, int dstChunkCapacity, Entity srcEntity, Entity* dstEntities, int entityCount, int dstTypeIndex, int dstBaseIndex, ref object[] gameObjectInstances);
+        internal delegate void InstantiateHybridComponentDelegate(int* srcArray, int componentCount, Entity* dstEntities, int* dstComponentLinkIndices, int* dstArray, int instanceCount, ManagedComponentStore managedComponentStore);
         internal static InstantiateHybridComponentDelegate InstantiateHybridComponent;
+
+        internal delegate void AssignHybridComponentsToCompanionGameObjectsDelegate(EntityManager entityManager, NativeArray<Entity> entities);
+        internal static AssignHybridComponentsToCompanionGameObjectsDelegate AssignHybridComponentsToCompanionGameObjects;
+
+        private sealed class ManagedComponentStoreKeyContext
+        {
+        }
+
+        private sealed class CompanionLinkTypeIndexStatic
+        {
+            public static readonly SharedStatic<int> Ref = SharedStatic<int>.GetOrCreate<ManagedComponentStoreKeyContext, CompanionLinkTypeIndexStatic>();
+        }
+
+        public static int CompanionLinkTypeIndex
+        {
+            get => CompanionLinkTypeIndexStatic.Ref.Data;
+            set => CompanionLinkTypeIndexStatic.Ref.Data = value;
+        }
 
         public ManagedComponentStore()
         {
@@ -58,6 +82,10 @@ namespace Unity.Entities
         {
             for (var i = 1; i != m_SharedComponentData.Count; i++)
                 (m_SharedComponentData[i] as IRefCounted)?.Release();
+
+            for (var i = 0; i != m_ManagedComponentData.Length; i++)
+                DisposeManagedObject(m_ManagedComponentData[i]);
+
             m_SharedComponentInfo.Dispose();
             m_SharedComponentData.Clear();
             m_SharedComponentData = null;
@@ -69,7 +97,7 @@ namespace Unity.Entities
             m_HashLookup.Clear();
             m_SharedComponentData.Clear();
             m_SharedComponentInfo.Clear();
-            
+
             m_SharedComponentData.Add(null);
             m_SharedComponentInfo.Add(new SharedComponentInfo { RefCount = 1, ComponentType = -1, Version = 1, HashCode = 0});
             m_FreeListIndex = -1;
@@ -198,7 +226,7 @@ namespace Unity.Entities
             {
                 SharedComponentInfoPtr[index].RefCount++;
             }
-    
+
             return index;
         }
 
@@ -223,7 +251,7 @@ namespace Unity.Entities
                 ComponentType = typeIndex,
                 HashCode = hashCode
             };
-            
+
             if (m_FreeListIndex != -1)
             {
                 var infos = SharedComponentInfoPtr;
@@ -252,7 +280,7 @@ namespace Unity.Entities
         {
             SharedComponentInfoPtr[index].Version++;
         }
-        
+
         public int GetSharedComponentVersion<T>(T sharedData) where T : struct
         {
             var index = FindSharedComponentIndex(TypeManager.GetTypeIndex<T>(), sharedData);
@@ -299,7 +327,7 @@ namespace Unity.Entities
                 return;
 
             var infos = SharedComponentInfoPtr;
-            
+
             var newCount = infos[index].RefCount -= numRefs;
             Assert.IsTrue(newCount >= 0);
 
@@ -331,7 +359,7 @@ namespace Unity.Entities
                 }
                 while (m_HashLookup.TryGetNextValue(out itemIndex, ref iter));
             }
-            
+
             #if ENABLE_UNITY_COLLECTIONS_CHECKS
             throw new System.InvalidOperationException("shared component couldn't be removed due to internal state corruption");
             #endif
@@ -347,7 +375,7 @@ namespace Unity.Entities
                 if (m_SharedComponentData[i] != null)
                 {
                     refcount++;
-                    
+
                     var hashCode = infos[i].HashCode;
 
                     bool found = false;
@@ -367,7 +395,7 @@ namespace Unity.Entities
                 }
             }
 
-            Assert.AreEqual(refcount, m_HashLookup.Length);
+            Assert.AreEqual(refcount, m_HashLookup.Count());
         }
 
         public bool IsEmpty()
@@ -389,12 +417,12 @@ namespace Unity.Entities
             if (m_SharedComponentData[0] != null)
                 return false;
 
-            if (m_HashLookup.Length != 0)
+            if (m_HashLookup.Count() != 0)
                 return false;
 
             return true;
         }
-        
+
         public void CopySharedComponents(ManagedComponentStore srcManagedComponents, int* sharedComponentIndices, int sharedComponentIndicesCount)
         {
             var srcInfos = srcManagedComponents.SharedComponentInfoPtr;
@@ -481,12 +509,12 @@ namespace Unity.Entities
                 var sharedComponentValues = chunk->SharedComponentValues;
                 for (int sharedComponentIndex = 0; sharedComponentIndex < archetype->NumSharedComponents; ++sharedComponentIndex)
                     remapPtr[sharedComponentValues[sharedComponentIndex]]++;
-            }        
+            }
 
             remap[0] = 0;
 
             // Move all shared components that are being referenced
-            // remap will have a remap table of src SharedComponentDataIndex -> dst SharedComponentDataIndex 
+            // remap will have a remap table of src SharedComponentDataIndex -> dst SharedComponentDataIndex
             var srcInfos = srcManagedComponents.SharedComponentInfoPtr;
             for (int srcIndex = 1; srcIndex < remap.Length; ++srcIndex)
             {
@@ -502,7 +530,7 @@ namespace Unity.Entities
                 // * remove refcount based on refcount table
                 // * -1 because InsertSharedComponentAssumeNonDefault above adds 1 refcount
                 int srcRefCount = remapPtr[srcIndex];
-                SharedComponentInfoPtr[dstIndex].RefCount += srcRefCount - 1; 
+                SharedComponentInfoPtr[dstIndex].RefCount += srcRefCount - 1;
                 srcManagedComponents.RemoveReference(srcIndex, srcRefCount);
                 SharedComponentInfoPtr[dstIndex].Version++;
 
@@ -512,19 +540,14 @@ namespace Unity.Entities
             return remap;
         }
 
-        public void MoveManagedObjectArrays(NativeArray<int> srcIndices, NativeArray<int> dstIndices, ManagedComponentStore srcManagedComponentStore)
+        public void MoveManagedComponentsFromDifferentWorld(NativeArray<int> srcIndices, NativeArray<int> dstIndices, int count, ManagedComponentStore srcManagedComponentStore)
         {
-#if ENABLE_UNITY_COLLECTIONS_CHECKS
-            if (srcIndices.Length != dstIndices.Length)
-                throw new ArgumentException($"The amount of source and destination indices when moving managed arrays should match! {srcIndices.Length} != {dstIndices.Length}");
-#endif
-
-            for (int i = 0; i < srcIndices.Length; ++i)
+            for (int i = 0; i < count; ++i)
             {
                 int src = srcIndices[i];
                 int dst = dstIndices[i];
-                m_ManagedArrays[dst] = srcManagedComponentStore.m_ManagedArrays[src];
-                srcManagedComponentStore.m_ManagedArrays[src] = new ManagedArrayStorage();
+                m_ManagedComponentData[dst] = srcManagedComponentStore.m_ManagedComponentData[src];
+                srcManagedComponentStore.m_ManagedComponentData[src] = null;
             }
         }
 
@@ -538,266 +561,52 @@ namespace Unity.Entities
             ResetSharedComponentData();
         }
 
-        internal void DeallocateManagedArrayStorage(int index)
-        {
-            Assert.IsTrue(m_ManagedArrays.Length > index);
-            Assert.IsTrue(m_ManagedArrays[index].ManagedArray != null);
-            m_ManagedArrays[index] = new ManagedArrayStorage();
-        }
-
-        internal void AllocateManagedArrayStorage(int index, int length)
-        {
-            var managedArray = new object[length];
-            var managedArrayStorage = new ManagedArrayStorage {ManagedArray = managedArray};
-            if (m_ManagedArrays.Length <= index)
-            {
-                Array.Resize(ref m_ManagedArrays, index + 1);
-            }
-
-            m_ManagedArrays[index] = managedArrayStorage;
-        }
-
-        internal void ReserveManagedArrayStorage(int count)
-        {
-            Array.Resize(ref m_ManagedArrays, m_ManagedArrays.Length + count);
-        }
-
-        public object GetManagedObject(Chunk* chunk, ComponentType type, int index)
-        {
-            var typeOfs = ChunkDataUtility.GetIndexInTypeArray(chunk->Archetype, type.TypeIndex);
-            if (typeOfs < 0 || chunk->Archetype->ManagedArrayOffset[typeOfs] < 0)
-                throw new InvalidOperationException("Trying to get managed object for non existing component");
-            return GetManagedObject(chunk, typeOfs, index);
-        }
-
-        internal object GetManagedObject(Chunk* chunk, int type, int index)
-        {
-            var managedStart = chunk->Archetype->ManagedArrayOffset[type] * chunk->Capacity;
-            return m_ManagedArrays[chunk->ManagedArrayIndex].ManagedArray[index + managedStart];
-        }
-
-        internal object GetManagedObject(Archetype* archetype, int managedArrayIndex, int chunkCapacity, int type, int index)
-        {
-            var managedStart = archetype->ManagedArrayOffset[type] * chunkCapacity;
-            return m_ManagedArrays[managedArrayIndex].ManagedArray[index + managedStart];
-        }
-
-        public object[] GetManagedObjectRange(Chunk* chunk, int type, out int rangeStart, out int rangeLength)
-        {
-            rangeStart = chunk->Archetype->ManagedArrayOffset[type] * chunk->Capacity;
-            rangeLength = chunk->Count;
-            return m_ManagedArrays[chunk->ManagedArrayIndex].ManagedArray;
-        }
-
-        public void SetManagedObject(Chunk* chunk, int type, int index, object val)
-        {
-            var managedStart = chunk->Archetype->ManagedArrayOffset[type] * chunk->Capacity;
-            m_ManagedArrays[chunk->ManagedArrayIndex].ManagedArray[index + managedStart] = val;
-        }
-
-        public void SetManagedObject(Archetype* archetype, int managedArrayIndex, int chunkCapacity, int type, int index, object val)
-        {
-            var managedStart = archetype->ManagedArrayOffset[type] * chunkCapacity;
-            m_ManagedArrays[managedArrayIndex].ManagedArray[index + managedStart] = val;
-        }
-
-        public void SetManagedObject(Chunk* chunk, ComponentType type, int index, object val)
-        {
-            var typeOfs = ChunkDataUtility.GetIndexInTypeArray(chunk->Archetype, type.TypeIndex);
-            if (typeOfs < 0 || chunk->Archetype->ManagedArrayOffset[typeOfs] < 0)
-                throw new InvalidOperationException("Trying to set managed object for non existing component");
-            SetManagedObject(chunk, typeOfs, index, val);
-        }
-
-        public static void CopyManagedObjects(
-            ManagedComponentStore srcStore, Archetype* srcArch, int srcManagedArrayIndex, int srcChunkCapacity, int srcStartIndex,
-            ManagedComponentStore dstStore, Archetype* dstArch, int dstManagedArrayIndex, int dstChunkCapacity, int dstStartIndex, int count)
-        {
-            var srcI = 0;
-            var dstI = 0;
-            while (srcI < srcArch->TypesCount && dstI < dstArch->TypesCount)
-            {
-                if (srcArch->Types[srcI] < dstArch->Types[dstI])
-                {
-                    ++srcI;
-                }
-                else if (srcArch->Types[srcI] > dstArch->Types[dstI])
-                {
-                    ++dstI;
-                }
-                else
-                {
-                    if (srcArch->IsManaged(srcI))
-                    {
-                        var componentType = srcArch->Types[srcI];
-                        var typeInfo = TypeManager.GetTypeInfo(componentType.TypeIndex);
-                        if (typeInfo.Category == TypeManager.TypeCategory.Class)
-                        {
-                            // If we are dealing with a Class/GameObject types just perform a shallow copy
-                            for (var i = 0; i < count; ++i)
-                            {
-                                var obj = srcStore.GetManagedObject(srcArch, srcManagedArrayIndex, srcChunkCapacity, srcI, srcStartIndex + i);
-                                dstStore.SetManagedObject(dstArch, dstManagedArrayIndex, dstChunkCapacity, dstI, dstStartIndex + i, obj);
-                            }
-                        }
-                        else
-                        {
-                            for (var i = 0; i < count; ++i)
-                            {
-                                var obj = srcStore.GetManagedObject(srcArch, srcManagedArrayIndex, srcChunkCapacity, srcI, srcStartIndex + i);
-                                dstStore.SetManagedObject(dstArch, dstManagedArrayIndex, dstChunkCapacity, dstI, dstStartIndex + i, obj);
-                            }
-                        }
-                    }
-
-                    ++srcI;
-                    ++dstI;
-                }
-            }
-        }
-
-        public static void ReplicateManagedObjects(
-            ManagedComponentStore srcStore, Archetype* srcArch, int srcManagedArrayIndex, int srcChunkCapacity, int srcIndex,
-            ManagedComponentStore dstStore, Archetype* dstArch, int dstManagedArrayIndex, int dstChunkCapacity, int dstBaseIndex,
-            int count, Entity srcEntity, Entity* dstEntities, int entityCount)
-        {
-            object[] companionGameObjectInstances = null;
-
-            var srcI = 0;
-            var dstI = 0;
-            while (srcI < srcArch->TypesCount && dstI < dstArch->TypesCount)
-            {
-                if (srcArch->Types[srcI] < dstArch->Types[dstI])
-                {
-                    ++srcI;
-                }
-                else if (srcArch->Types[srcI] > dstArch->Types[dstI])
-                {
-                    ++dstI;
-                }
-                else
-                {
-                    if (srcArch->IsManaged(srcI))
-                    {
-                        var componentType = srcArch->Types[srcI];
-                        var typeInfo = TypeManager.GetTypeInfo(componentType.TypeIndex);
-                        var obj = srcStore.GetManagedObject(srcArch, srcManagedArrayIndex, srcChunkCapacity, srcI, srcIndex);
-
-                        if (typeInfo.Category == TypeManager.TypeCategory.Class)
-                        {
-                            // If we're dealing with a class based type, we will defer the execution to InstantiateHybridComponent (if dependency injection was made), this method will
-                            // - Determine if the object should be cloned (true is returned) or referenced (false is returned)
-                            // - Clone the GameObject and its components (as many times as we have in 'count'), and make it a Companion Game Object by adding a CompanionLink component to it
-                            // - Add the Cloned Hybrid Component to the instantiated entities (again 'count' times)
-                            if (InstantiateHybridComponent == null || !InstantiateHybridComponent(obj, srcStore, dstArch, dstStore, dstManagedArrayIndex, dstChunkCapacity, srcEntity, dstEntities, entityCount, dstI, dstBaseIndex, ref companionGameObjectInstances))
-                            {
-                                // We end up here if we have to reference the object and not cloning it
-                                for (var i = 0; i < count; ++i)
-                                {
-                                    dstStore.SetManagedObject(dstArch, dstManagedArrayIndex, dstChunkCapacity, dstI, dstBaseIndex + i, obj);
-                                }
-                            }
-                        }
-                        else
-                        {
-#if NET_DOTS
-                            for (var i = 0; i < count; ++i)
-                            {
-                                // Until DOTS Runtime supports Properties just perform a simple shallow copy
-                                dstStore.SetManagedObject(dstArch, dstManagedArrayIndex, dstChunkCapacity, dstI, dstBaseIndex + i, obj);
-                            }
-#else
-                            if (obj == null)
-                            {
-                                // If we are dealing with a Class/GameObject types just perform a shallow copy
-                                for (var i = 0; i < count; ++i)
-                                {
-                                    dstStore.SetManagedObject(dstArch, dstManagedArrayIndex, dstChunkCapacity, dstI, dstBaseIndex + i, obj);
-                                }
-                            }
-                            else
-                            {
-                                // Unless we want to enforce managed components to implement an IDeepClonable interface
-                                // we instead generate a binary stream of an object and then use that to instantiate our new deep copy
-                                var type = TypeManager.GetType(componentType.TypeIndex);
-                                var buffer = new UnsafeAppendBuffer(16, 16, Allocator.Temp);
-                                var writer = new PropertiesBinaryWriter(&buffer);
-                                BoxedProperties.WriteBoxedType(obj, writer);
-
-                                for (var i = 0; i < count; ++i)
-                                {
-                                    var readBuffer = buffer.AsReader();
-                                    var reader = new PropertiesBinaryReader(&readBuffer, writer.GetObjectTable());
-                                    object newObj = BoxedProperties.ReadBoxedClass(type, reader);
-
-                                    dstStore.SetManagedObject(dstArch, dstManagedArrayIndex, dstChunkCapacity, dstI, dstBaseIndex + i, newObj);
-                                }
-                                buffer.Dispose();
-                            }
-#endif
-                        }
-                    }
-
-                    ++srcI;
-                    ++dstI;
-                }
-            }
-        }
-
-        public void PatchEntities(ManagedComponentStore managedComponentStore, Archetype* archetype, Chunk* chunk, int entityCount,
+        public void PatchEntities(Archetype* archetype, Chunk* chunk, int entityCount,
             EntityRemapUtility.EntityRemapInfo* remapping)
         {
 #if !NET_DOTS
-            var managedPatches = archetype->ManagedEntityPatches;
-            var managedPatchCount = archetype->ManagedEntityPatchCount;
+            var firstManagedComponent = archetype->FirstManagedComponent;
+            var numManagedComponents = archetype->NumManagedComponents;
+            var hasHybridComponents = archetype->HasHybridComponents;
+            var types = archetype->Types;
 
-            // Patch managed components with entity references.
-            for (int p = 0; p < managedPatchCount; p++)
+            for (int i = 0; i < numManagedComponents; ++i)
             {
-                var componentType = managedPatches[p].Type;
-
-                for (int i = 0; i != entityCount; i++)
+                int type = i + firstManagedComponent;
+                if (!hasHybridComponents || TypeManager.GetTypeInfo(types[type].TypeIndex).Category != TypeManager.TypeCategory.Class)
                 {
-                    var obj = managedComponentStore.GetManagedObject(chunk, componentType, i);
-                    EntityRemapUtility.PatchEntityInBoxedType(obj, remapping);
+                    var a = (int*) ChunkDataUtility.GetComponentDataRO(chunk, 0, type);
+                    for (int ei = 0; ei < entityCount; ++ei)
+                    {
+                        if (a[ei] != 0)
+                        {
+                            var obj = m_ManagedComponentData[a[ei]];
+                            m_ManagedObjectRemap.RemapEntityReferences(ref obj, remapping);
+                        }
+                    }
                 }
             }
 #endif
         }
 
-        public void PatchEntitiesForPrefab(ManagedComponentStore managedComponentStore, Archetype* archetype, Chunk* chunk, int indexInChunk, int entityCount,
-            EntityRemapUtility.SparseEntityRemapInfo* remapping, int remappingCount, Allocator allocator)
+        void PatchEntitiesForPrefab(int* managedComponents, int numManagedComponents, int allocatedCount, int remappingCount, Entity* remapSrc, Entity* remapDst)
         {
 #if !NET_DOTS
-            var managedPatches = archetype->ManagedEntityPatches;
-            var managedPatchCount = archetype->ManagedEntityPatchCount;
-
-            // Patch managed components with entity references.
-            for (int p = 0; p < managedPatchCount; p++)
+            for (int i = 0; i < allocatedCount; ++i)
             {
-                var componentType = managedPatches[p].Type;
-
-                for (int e = 0; e != entityCount; e++)
+                for (int c = 0; c < numManagedComponents; c++)
                 {
-                    var obj = managedComponentStore.GetManagedObject(chunk, componentType, e + indexInChunk);
-
-                    EntityRemapUtility.PatchEntityForPrefabInBoxedType(obj, remapping + e * remappingCount, remappingCount);
+                    var managedComponentIndex = managedComponents[c];
+                    if (managedComponentIndex != 0)
+                    {
+                        var obj = m_ManagedComponentData[managedComponentIndex];
+                        m_ManagedObjectRemap.RemapEntityReferencesForPrefab(ref obj, remapSrc, remapDst, remappingCount);
+                    }
                 }
+                managedComponents += numManagedComponents;
+                remapDst += remappingCount;
             }
-            UnsafeUtility.Free(remapping, allocator);
 #endif
-        }
-
-        public void ClearManagedObjects(Archetype* archetype, int managedArrayIndex, int chunkCapacity, int index, int count)
-        {
-            for (var type = 0; type < archetype->TypesCount; ++type)
-            {
-                if (archetype->ManagedArrayOffset[type] < 0)
-                    continue;
-
-                for (var i = 0; i < count; ++i)
-                    SetManagedObject(archetype, managedArrayIndex, chunkCapacity, type, index + i, null);
-            }
         }
 
         public void Playback(ref ManagedDeferredCommands managedDeferredCommands)
@@ -812,55 +621,6 @@ namespace Unity.Entities
                     {
                         var sharedIndex = reader.ReadNext<int>();
                         IncrementSharedComponentVersion(sharedIndex);
-                    }
-                    break;
-
-                    case (ManagedDeferredCommands.Command.CopyManagedObjects):
-                    {
-                        var srcArchetype = (Archetype*)reader.ReadNext<IntPtr>();
-                        var srcManagedArrayIndex = reader.ReadNext<int>();
-                        var srcChunkCapacity = reader.ReadNext<int>();
-                        var srcStartIndex = reader.ReadNext<int>();
-                        var dstArchetype = (Archetype*)reader.ReadNext<IntPtr>();
-                        var dstManagedArrayIndex = reader.ReadNext<int>();
-                        var dstChunkCapacity = reader.ReadNext<int>();
-                        var dstStartIndex = reader.ReadNext<int>();
-                        var count = reader.ReadNext<int>();
-
-                        CopyManagedObjects(this, srcArchetype, srcManagedArrayIndex, srcChunkCapacity, srcStartIndex,
-                            this, dstArchetype, dstManagedArrayIndex, dstChunkCapacity, dstStartIndex, count);
-                    }
-                    break;
-
-                    case (ManagedDeferredCommands.Command.ReplicateManagedObjects):
-                    {
-                        var srcArchetype = (Archetype*)reader.ReadNext<IntPtr>();
-                        var srcManagedArrayIndex = reader.ReadNext<int>();
-                        var srcChunkCapacity = reader.ReadNext<int>();
-                        var srcIndex = reader.ReadNext<int>();
-                        var dstArchetype = (Archetype*)reader.ReadNext<IntPtr>();
-                        var dstManagedArrayIndex = reader.ReadNext<int>();
-                        var dstChunkCapacity = reader.ReadNext<int>();
-                        var dstBaseStartIndex = reader.ReadNext<int>();
-                        var count = reader.ReadNext<int>();
-
-                        var srcEntity = reader.ReadNext<Entity>();
-                        var dstEntities = (Entity*)reader.ReadNextArray<Entity>(out var entityCount);
-
-                        ReplicateManagedObjects(this, srcArchetype, srcManagedArrayIndex, srcChunkCapacity, srcIndex,
-                            this, dstArchetype, dstManagedArrayIndex, dstChunkCapacity, dstBaseStartIndex, count, srcEntity, dstEntities, entityCount);
-                    }
-                    break;
-
-                    case (ManagedDeferredCommands.Command.ClearManagedObjects):
-                    {
-                        var archetype = (Archetype*)reader.ReadNext<IntPtr>();
-                        var managedArrayIndex = reader.ReadNext<int>();
-                        var chunkCapacity = reader.ReadNext<int>();
-                        var index = reader.ReadNext<int>();
-                        var count = reader.ReadNext<int>();
-
-                        ClearManagedObjects(archetype, managedArrayIndex, chunkCapacity, index, count);
                     }
                     break;
 
@@ -880,42 +640,6 @@ namespace Unity.Entities
                     }
                     break;
 
-                    case (ManagedDeferredCommands.Command.DeallocateManagedArrayStorage):
-                    {
-                        var index = reader.ReadNext<int>();
-                        DeallocateManagedArrayStorage(index);
-                    }
-                    break;
-
-                    case (ManagedDeferredCommands.Command.AllocateManagedArrayStorage):
-                    {
-                        var index = reader.ReadNext<int>();
-                        var length = reader.ReadNext<int>();
-                        AllocateManagedArrayStorage(index, length);
-                    }
-                    break;
-
-                    case (ManagedDeferredCommands.Command.ReserveManagedArrayStorage):
-                    {
-                        var count = reader.ReadNext<int>();
-                        ReserveManagedArrayStorage(count);
-                    }
-                    break;
-
-                    case (ManagedDeferredCommands.Command.MoveChunksManagedObjects):
-                    {
-                        var oldArchetype = (Archetype*)reader.ReadNext<IntPtr>();
-                        var oldManagedArrayIndex = reader.ReadNext<int>();
-                        var newArchetype = (Archetype*)reader.ReadNext<IntPtr>();
-                        var newManagedArrayIndex = reader.ReadNext<int>();
-                        var chunkCapacity = reader.ReadNext<int>();
-                        var count = reader.ReadNext<int>();
-
-                        CopyManagedObjects(this, oldArchetype, oldManagedArrayIndex, chunkCapacity, 0,
-                            this, newArchetype, newManagedArrayIndex, chunkCapacity, 0, count);
-                    }
-                    break;
-
                     case (ManagedDeferredCommands.Command.PatchManagedEntities):
                     {
                         var archetype = (Archetype*)reader.ReadNext<IntPtr>();
@@ -923,27 +647,172 @@ namespace Unity.Entities
                         var entityCount = reader.ReadNext<int>();
                         var remapping = (EntityRemapUtility.EntityRemapInfo*)reader.ReadNext<IntPtr>();
 
-                        PatchEntities(this, archetype, chunk, entityCount, remapping);
+                        PatchEntities(archetype, chunk, entityCount, remapping);
                     }
                     break;
 
                     case (ManagedDeferredCommands.Command.PatchManagedEntitiesForPrefabs):
                     {
-                        var archetype = (Archetype*)reader.ReadNext<IntPtr>();
-                        var chunk = (Chunk*)reader.ReadNext<IntPtr>();
-                        var indexInChunk = reader.ReadNext<int>();
-                        var entityCount = reader.ReadNext<int>();
-                        var remapping = (EntityRemapUtility.SparseEntityRemapInfo*)reader.ReadNext<IntPtr>();
+                        var remapSrc = (byte*)reader.ReadNext<IntPtr>();
+                        var allocatedCount = reader.ReadNext<int>();
                         var remappingCount = reader.ReadNext<int>();
+                        var numManagedComponents = reader.ReadNext<int>();
                         var allocator = (Allocator)reader.ReadNext<int>();
 
-                        PatchEntitiesForPrefab(this, archetype, chunk, indexInChunk, entityCount, remapping, remappingCount, allocator);
+
+                        var remapSrcSize = UnsafeUtility.SizeOf<Entity>() * remappingCount;
+                        var remapDstSize = UnsafeUtility.SizeOf<Entity>() * remappingCount * allocatedCount;
+
+                        var remapDst = remapSrc + remapSrcSize;
+                        var managedComponents = remapDst + remapDstSize;
+
+                        PatchEntitiesForPrefab((int*)managedComponents, numManagedComponents, allocatedCount, remappingCount, (Entity*)remapSrc, (Entity*)remapDst);
+                        UnsafeUtility.Free(remapSrc, allocator);
+                    }
+                    break;
+
+                    case (ManagedDeferredCommands.Command.CloneManagedComponents):
+                    {
+                        var srcArray = (int*)reader.ReadNextArray<int>(out var componentCount);
+                        var instanceCount = reader.ReadNext<int>();
+                        var dstArray = (int*)reader.ReadNextArray<int>(out _);
+                        CloneManagedComponents(srcArray, componentCount, dstArray, instanceCount);
+                    }
+                    break;
+
+                    case (ManagedDeferredCommands.Command.CloneHybridComponents):
+                    {
+                        var srcArray = (int*)reader.ReadNextArray<int>(out var componentCount);
+                        var entities = (Entity*)reader.ReadNextArray<Entity>(out var instanceCount);
+                        var dstComponentLinkIndices = (int*)reader.ReadNextArray<int>(out _);
+                        var dstArray = (int*)reader.ReadNextArray<int>(out _);
+
+                        if (InstantiateHybridComponent != null)
+                            InstantiateHybridComponent(srcArray, componentCount, entities, dstComponentLinkIndices, dstArray, instanceCount, this);
+                        else
+                        {
+                            // InstantiateHybridComponent was not injected just copy the reference to the object and dont clone it
+                            for (int src = 0; src < componentCount; ++src)
+                            {
+                                object sourceComponent = m_ManagedComponentData[srcArray[src]];
+                                for (int i = 0; i < instanceCount; ++i)
+                                    m_ManagedComponentData[dstArray[i]] = sourceComponent;
+                                dstArray += instanceCount;
+                            }
+                        }
+                    }
+                    break;
+
+                    case (ManagedDeferredCommands.Command.FreeManagedComponents):
+                    {
+                        var count = reader.ReadNext<int>();
+                        for (int i = 0; i < count; ++i)
+                        {
+                            var managedComponentIndex = reader.ReadNext<int>();
+                            (m_ManagedComponentData[managedComponentIndex] as IDisposable)?.Dispose();
+                            m_ManagedComponentData[managedComponentIndex] = null;
+                        }
+                    }
+                    break;
+
+                    case (ManagedDeferredCommands.Command.SetManagedComponentCapacity):
+                    {
+                        var capacity = reader.ReadNext<int>();
+                        SetManagedComponentCapacity(capacity);
                     }
                     break;
                 }
             }
 
             managedDeferredCommands.Reset();
+        }
+
+        private void CloneManagedComponents(int* srcArray, int componentCount, int* dstArray, int instanceCount)
+        {
+            for (int src = 0; src < componentCount; ++src)
+            {
+                object sourceComponent = m_ManagedComponentData[srcArray[src]];
+                for (int i = 0; i < instanceCount; ++i)
+                    m_ManagedComponentData[dstArray[i]] = m_ManagedObjectClone.Clone(sourceComponent);
+                dstArray += instanceCount;
+            }
+        }
+
+        internal void SetManagedComponentValue(int index, object componentObject)
+        {
+            m_ManagedComponentData[index] = componentObject;
+        }
+
+        // Ensure there are at least "count" free managed component indices and
+        // resize managed component array directly if needed
+        public void ReserveManagedComponentIndicesDirect(int count, ref EntityComponentStore entityComponentStore)
+        {
+            int freeCount = entityComponentStore.ManagedComponentFreeCount;
+            if (freeCount >= count)
+                return;
+
+            int newCapacity = entityComponentStore.GrowManagedComponentCapacity(count - freeCount);
+            SetManagedComponentCapacity(newCapacity);
+        }
+
+        public void UpdateManagedComponentValue(int* index, object value, ref EntityComponentStore entityComponentStore)
+        {
+            entityComponentStore.AssertNoQueuedManagedDeferredCommands();
+            var iManagedComponent = *index;
+
+            if (iManagedComponent != 0)
+                (m_ManagedComponentData[iManagedComponent] as IDisposable)?.Dispose();
+
+            if (value != null)
+            {
+                if (iManagedComponent == 0)
+                {
+                    ReserveManagedComponentIndicesDirect(1, ref entityComponentStore);
+                    iManagedComponent = *index = entityComponentStore.AllocateManagedComponentIndex();
+                }
+            }
+            else
+            {
+                if (iManagedComponent == 0)
+                    return;
+                *index = 0;
+                entityComponentStore.FreeManagedComponentIndex(iManagedComponent);
+            }
+            m_ManagedComponentData[iManagedComponent] = value;
+        }
+
+        public void CloneManagedComponentsFromDifferentWorld(int* indices, int count, ManagedComponentStore srcManagedComponentStore, ref EntityComponentStore dstEntityComponentStore)
+        {
+            dstEntityComponentStore.AssertNoQueuedManagedDeferredCommands();
+            ReserveManagedComponentIndicesDirect(count, ref dstEntityComponentStore);
+            for (int i = 0; i < count; ++i)
+            {
+                var obj = srcManagedComponentStore.m_ManagedComponentData[indices[i]];
+                var clone = m_ManagedObjectClone.Clone(obj);
+                int dstIndex = dstEntityComponentStore.AllocateManagedComponentIndex();
+                indices[i] = dstIndex;
+                (m_ManagedComponentData[dstIndex] as IDisposable)?.Dispose();
+                m_ManagedComponentData[dstIndex] = clone;
+            }
+        }
+
+        public void ResetManagedComponentStoreForDeserialization(int managedComponentCount, ref EntityComponentStore entityComponentStore)
+        {
+            managedComponentCount++; // also need space for 0 index (null)
+            Assert.AreEqual(0, entityComponentStore.ManagedComponentIndexUsedCount);
+            entityComponentStore.m_ManagedComponentFreeIndex.Length = 0;
+            entityComponentStore.m_ManagedComponentIndex = managedComponentCount;
+            if (managedComponentCount > entityComponentStore.m_ManagedComponentIndexCapacity)
+            {
+                entityComponentStore.m_ManagedComponentIndexCapacity = managedComponentCount;
+                SetManagedComponentCapacity(managedComponentCount);
+            }
+        }
+
+        public static void DisposeManagedObject(object obj)
+        {
+            if (obj is IDisposable disposable)
+                disposable.Dispose();
         }
     }
 }

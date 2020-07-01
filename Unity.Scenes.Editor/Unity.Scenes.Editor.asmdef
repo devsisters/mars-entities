@@ -2,16 +2,17 @@
     "name": "Unity.Scenes.Editor",
     "references": [
         "Unity.Build",
+        "Unity.Build.Classic",
         "Unity.Build.Common",
-        "Unity.Build.Internals",
         "Unity.Collections",
         "Unity.Entities",
         "Unity.Entities.Hybrid",
         "Unity.Mathematics",
         "Unity.Mathematics.Extensions",
-        "Unity.Platforms",
+        "Unity.Properties",
         "Unity.Scenes.Hybrid",
-        "Unity.ScriptableBuildPipeline.Editor"
+        "Unity.ScriptableBuildPipeline.Editor",
+        "Unity.Serialization"
     ],
     "includePlatforms": [
         "Editor"

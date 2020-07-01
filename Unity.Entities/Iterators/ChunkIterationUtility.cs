@@ -1,16 +1,29 @@
-﻿using System;
+using System;
+using Unity.Burst;
 using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
 using Unity.Jobs;
 using Unity.Jobs.LowLevel.Unsafe;
+using UnityEngine.Assertions;
 
 namespace Unity.Entities
 {
     /// <summary>
     ///     Enables iteration over chunks belonging to a set of archetypes.
     /// </summary>
+    [BurstCompile]
     internal unsafe struct ChunkIterationUtility
     {
+        public delegate int ChunkIterationCalculation(in UnsafeMatchingArchetypePtrList matchingArchetypes, ref EntityQueryFilter filter);
+
+#if NET_DOTS
+        public readonly static ChunkIterationCalculation CalculateEntityCount = CalculateEntityCountExecute;
+        public readonly static ChunkIterationCalculation CalculateChunkCount = CalculateChunkCountExecute;
+#else
+        public readonly static ChunkIterationCalculation CalculateEntityCount = BurstCompiler.CompileFunctionPointer<ChunkIterationCalculation>(CalculateEntityCountExecute).Invoke;
+        public readonly static ChunkIterationCalculation CalculateChunkCount = BurstCompiler.CompileFunctionPointer<ChunkIterationCalculation>(CalculateChunkCountExecute).Invoke;
+#endif
+
         /// <summary>
         /// Creates a NativeArray with all the chunks in a given archetype filtered by the provided EntityQueryFilter.
         /// This function will not sync the needed types in the EntityQueryFilter so they have to be synced manually before calling this function.
@@ -49,14 +62,13 @@ namespace Unity.Entities
                     Offsets = offsets,
                     Chunks = chunks
                 };
-                var gatherChunksJobHandle = gatherChunksJob.Schedule(archetypeCount,1, dependsOn);
-                jobHandle = gatherChunksJobHandle;
+                jobHandle = gatherChunksJob.Schedule(archetypeCount, 1, dependsOn);
 
                 return chunks;
             }
             else
             {
-                var filteredCounts =  new NativeArray<int>(archetypeCount+1, Allocator.TempJob);
+                var filteredCounts =  new NativeArray<int>(archetypeCount + 1, Allocator.TempJob);
                 var sparseChunks = new NativeArray<ArchetypeChunk>(chunkCount, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
                 var gatherChunksJob = new GatherChunksWithFiltering
                 {
@@ -67,7 +79,7 @@ namespace Unity.Entities
                     SparseChunks = sparseChunks,
                     entityComponentStore = matchingArchetypes.entityComponentStore
                 };
-                gatherChunksJob.Schedule(archetypeCount,1, dependsOn).Complete();
+                gatherChunksJob.Schedule(archetypeCount, 1, dependsOn).Complete();
 
                 // accumulated filtered counts: filteredCounts[i] becomes the destination offset
                 int totalChunks = 0;
@@ -133,9 +145,8 @@ namespace Unity.Entities
             ref EntityQueryFilter filter,
             out JobHandle jobHandle,
             JobHandle dependsOn)
-
         {
-            var entityCount = CalculateEntityCount(matchingArchetypes, ref filter);
+            var entityCount = CalculateEntityCount(in matchingArchetypes, ref filter);
 
             var job = new GatherEntitiesJob
             {
@@ -156,16 +167,17 @@ namespace Unity.Entities
             JobHandle dependsOn)
             where T : struct, IComponentData
         {
-            var entityCount = CalculateEntityCount(matchingArchetypes, ref filter);
+            var entityCount = CalculateEntityCount(in matchingArchetypes, ref filter);
+            var componentData = new NativeArray<T>(entityCount, allocator);
 
-            var job = new GatherComponentDataJob<T>
+            var job = new GatherComponentDataJob
             {
-                ComponentData = new NativeArray<T>(entityCount, allocator),
-                ComponentType = type
+                ComponentData = (byte*)componentData.GetUnsafePtr(),
+                TypeIndex = type.m_TypeIndex
             };
             jobHandle = job.Schedule(entityQuery, dependsOn);
 
-            return job.ComponentData;
+            return componentData;
         }
 
         // In order to maximize EntityQuery.ForEach performance we want to avoid data allocation, as ForEach is main thread only we can afford to allocate a big array and use it to store result.
@@ -185,7 +197,7 @@ namespace Unity.Entities
             var buffer = s_EntityQueryResultBuffer;
             var curOffset = currentOffsetInResultBuffer;
 
-            // Main method that copies the entities of each chunk of a matching archetype to the buffer 
+            // Main method that copies the entities of each chunk of a matching archetype to the buffer
             bool AddArchetype(MatchingArchetype* matchingArchetype, ref EntityQueryFilter queryFilter)
             {
                 var archetype = matchingArchetype->Archetype;
@@ -194,11 +206,11 @@ namespace Unity.Entities
                 {
                     return true;
                 }
-                
+
                 var chunkCount = archetype->Chunks.Count;
                 var chunks = archetype->Chunks.p;
                 var counts = archetype->Chunks.GetChunkEntityCountArray();
-                
+
                 for (int i = 0; i < chunkCount; ++i)
                 {
                     // Ignore the chunk if the query uses filter and the chunk doesn't comply
@@ -212,14 +224,14 @@ namespace Unity.Entities
                     {
                         return false;
                     }
-                    
+
                     UnsafeUtility.MemCpy(buffer + curOffset, chunks[i]->Buffer, entityCountInChunk * sizeof(Entity));
                     curOffset += entityCountInChunk;
                 }
 
                 return true;
             }
-            
+
             // Parse all the matching archetypes and add the entities that fits the query and its filter
             bool success = true;
             ref var matchingArchetypes = ref queryData->MatchingArchetypes;
@@ -242,7 +254,7 @@ namespace Unity.Entities
 
             currentOffsetInResultBuffer = curOffset;
         }
-        
+
         public static void CopyFromComponentDataArray<T>(UnsafeMatchingArchetypePtrList matchingArchetypes,
             NativeArray<T> componentDataArray,
             ArchetypeChunkComponentType<T> type,
@@ -250,12 +262,12 @@ namespace Unity.Entities
             ref EntityQueryFilter filter,
             out JobHandle jobHandle,
             JobHandle dependsOn)
-            where T :struct, IComponentData
+            where T : struct, IComponentData
         {
-            var job = new CopyComponentArrayToChunks<T>
+            var job = new CopyComponentArrayToChunks
             {
-                ComponentData = componentDataArray,
-                ComponentType = type
+                ComponentData = (byte*)componentDataArray.GetUnsafePtr(),
+                TypeIndex = type.m_TypeIndex
             };
             jobHandle = job.Schedule(entityQuery, dependsOn);
         }
@@ -266,7 +278,9 @@ namespace Unity.Entities
         /// <param name="matchingArchetypes">List of matching archetypes.</param>
         /// <param name="filter">EntityQueryFilter to use when calculating total number of entities.</param>
         /// <returns>Number of entities</returns>
-        public static int CalculateEntityCount(UnsafeMatchingArchetypePtrList matchingArchetypes, ref EntityQueryFilter filter)
+        [BurstCompile]
+        [MonoPInvokeCallback(typeof(ChunkIterationCalculation))]
+        private static int CalculateEntityCountExecute(in UnsafeMatchingArchetypePtrList matchingArchetypes, ref EntityQueryFilter filter)
         {
             var length = 0;
             if (!filter.RequiresMatchesFilter)
@@ -302,13 +316,15 @@ namespace Unity.Entities
 
             return length;
         }
-        
-         /// <summary>
+
+        /// <summary>
         ///     Total number of chunks in a given MatchingArchetype list.
         /// </summary>
         /// <param name="matchingArchetypes">List of matching archetypes.</param>
         /// <returns>Number of chunks in a list of archetypes.</returns>
-        internal static int CalculateChunkCount(UnsafeMatchingArchetypePtrList matchingArchetypes, ref EntityQueryFilter filter)
+        [BurstCompile]
+        [MonoPInvokeCallback(typeof(ChunkIterationCalculation))]
+        private static int CalculateChunkCountExecute(in UnsafeMatchingArchetypePtrList matchingArchetypes, ref EntityQueryFilter filter)
         {
             var totalChunkCount = 0;
 
@@ -330,7 +346,7 @@ namespace Unity.Entities
                 var match = matchingArchetypes.Ptr[m];
                 var archetype = match->Archetype;
                 int chunkCount = archetype->Chunks.Count;
-                
+
                 for (var i = 0; i < chunkCount; ++i)
                 {
                     if (match->ChunkMatchesFilter(i, ref filter))
@@ -340,39 +356,42 @@ namespace Unity.Entities
 
             return totalChunkCount;
         }
-         
 
 #if ENABLE_UNITY_COLLECTIONS_CHECKS
         internal static BufferAccessor<T> GetChunkBufferAccessor<T>(Chunk* chunk, bool isWriting, int typeIndexInArchetype, uint systemVersion, AtomicSafetyHandle safety0, AtomicSafetyHandle safety1)
 #else
-        internal static BufferAccessor<T> GetChunkBufferAccessor<T>(Chunk* chunk, bool isWriting, int typeIndexInArchetype, uint systemVersion)
+        internal static BufferAccessor<T> GetChunkBufferAccessor<T>(Chunk * chunk, bool isWriting, int typeIndexInArchetype, uint systemVersion)
 #endif
             where T : struct, IBufferElementData
         {
             var archetype = chunk->Archetype;
             int internalCapacity = archetype->BufferCapacities[typeIndexInArchetype];
 
-            if (isWriting)
-                chunk->SetChangeVersion(typeIndexInArchetype, systemVersion);
+            byte* ptr = (!isWriting)
+                ? ChunkDataUtility.GetComponentDataRO(chunk, 0, typeIndexInArchetype)
+                : ChunkDataUtility.GetComponentDataRW(chunk, 0, typeIndexInArchetype);
 
-            var buffer = chunk->Buffer;
             var length = chunk->Count;
-            var startOffset = archetype->Offsets[typeIndexInArchetype];
             int stride = archetype->SizeOfs[typeIndexInArchetype];
 #if ENABLE_UNITY_COLLECTIONS_CHECKS
-            return new BufferAccessor<T>(buffer + startOffset, length, stride, !isWriting, safety0, safety1, internalCapacity);
+            return new BufferAccessor<T>(ptr, length, stride, !isWriting, safety0, safety1, internalCapacity);
 #else
-            return new BufferAccessor<T>(buffer + startOffset, length, stride, internalCapacity);
+            return new BufferAccessor<T>(ptr, length, stride, internalCapacity);
 #endif
         }
 
         internal static void* GetChunkComponentDataPtr(Chunk* chunk, bool isWriting, int indexInArchetype, uint systemVersion)
         {
             var archetype = chunk->Archetype;
+            byte* ptr = (!isWriting)
+                ? ChunkDataUtility.GetComponentDataRO(chunk, 0, indexInArchetype)
+                : ChunkDataUtility.GetComponentDataRW(chunk, 0, indexInArchetype);
+            return ptr;
+        }
 
-            if (isWriting)
-                chunk->SetChangeVersion(indexInArchetype, systemVersion);
-
+        internal static void* GetChunkComponentDataROPtr(Chunk* chunk, int indexInArchetype)
+        {
+            var archetype = chunk->Archetype;
             return chunk->Buffer + archetype->Offsets[indexInArchetype];
         }
 
@@ -384,8 +403,8 @@ namespace Unity.Entities
             var sizeofIndexArray = sizeof(int) * unfilteredChunkCount;
             var prefilterDataSize = sizeofChunkArray + sizeofIndexArray + sizeof(int);
 
-            var prefilterData = (byte*) UnsafeUtility.Malloc(prefilterDataSize, 64, Allocator.TempJob);
-            prefilterDataArray =NativeArrayUnsafeUtility.ConvertExistingDataToNativeArray<byte>(prefilterData, prefilterDataSize, Allocator.TempJob);
+            var prefilterData = (byte*)UnsafeUtility.Malloc(prefilterDataSize, 64, Allocator.TempJob);
+            prefilterDataArray = NativeArrayUnsafeUtility.ConvertExistingDataToNativeArray<byte>(prefilterData, prefilterDataSize, Allocator.TempJob);
 
 #if ENABLE_UNITY_COLLECTIONS_CHECKS
             NativeArrayUnsafeUtility.SetAtomicSafetyHandle(ref prefilterDataArray, AtomicSafetyHandle.Create());
@@ -429,13 +448,26 @@ namespace Unity.Entities
 
             return prefilterHandle;
         }
-        
+
         internal static void UnpackPrefilterData(NativeArray<byte> prefilterData, out ArchetypeChunk* chunks, out int* entityOffsets, out int filteredChunkCount)
         {
-            chunks = (ArchetypeChunk*) prefilterData.GetUnsafePtr();
+#if UNITY_DOTSPLAYER
+            // TODO should be GetUnsafePtr(). Working around a bug in the (DOTS-Runtime) safety checks.
+            // https://unity3d.atlassian.net/browse/DOTSR-927
+            chunks = (ArchetypeChunk*)NativeArrayUnsafeUtility.GetUnsafeBufferPointerWithoutChecks(prefilterData);
+#else
+            chunks = (ArchetypeChunk*)prefilterData.GetUnsafePtr();
+#endif
 
-            filteredChunkCount = *(int*)((byte*) prefilterData.GetUnsafePtr() + prefilterData.Length - sizeof(int));
-            entityOffsets = (int*) (chunks + filteredChunkCount);
+#if UNITY_DOTSPLAYER
+            // TODO should be GetUnsafePtr(). Working around a bug in the (DOTS-Runtime) safety checks.
+            // https://unity3d.atlassian.net/browse/DOTSR-927
+            filteredChunkCount = *(int*)((byte*)NativeArrayUnsafeUtility.GetUnsafeBufferPointerWithoutChecks(prefilterData) + prefilterData.Length - sizeof(int));
+#else
+            filteredChunkCount = *(int*)((byte*)prefilterData.GetUnsafePtr() + prefilterData.Length - sizeof(int));
+#endif
+            Assert.IsTrue(filteredChunkCount >= 0);
+            entityOffsets = (int*)(chunks + filteredChunkCount);
         }
     }
 }

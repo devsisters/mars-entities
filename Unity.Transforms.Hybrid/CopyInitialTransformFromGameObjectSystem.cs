@@ -1,4 +1,4 @@
-﻿using Unity.Collections;
+using Unity.Collections;
 using Unity.Entities;
 using Unity.Jobs;
 using Unity.Burst;
@@ -32,6 +32,7 @@ namespace Unity.Transforms
             }
         }
 
+#pragma warning disable 618
         [BurstCompile]
         struct CopyTransforms : IJobForEachWithEntity<LocalToWorld>
         {
@@ -52,6 +53,7 @@ namespace Unity.Transforms
                 };
             }
         }
+#pragma warning restore 618
 
         struct RemoveCopyInitialTransformFromGameObjectComponent : IJob
         {
@@ -75,9 +77,9 @@ namespace Unity.Transforms
         {
             m_EntityCommandBufferSystem = World.GetOrCreateSystem<EndInitializationEntityCommandBufferSystem>();
             m_InitialTransformGroup = GetEntityQuery(
-                    ComponentType.ReadOnly(typeof(CopyInitialTransformFromGameObject)),
-                    typeof(UnityEngine.Transform),
-                    ComponentType.ReadWrite<LocalToWorld>());
+                ComponentType.ReadOnly(typeof(CopyInitialTransformFromGameObject)),
+                typeof(UnityEngine.Transform),
+                ComponentType.ReadWrite<LocalToWorld>());
         }
 
         protected override JobHandle OnUpdate(JobHandle inputDeps)

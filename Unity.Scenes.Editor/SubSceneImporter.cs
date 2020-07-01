@@ -1,14 +1,16 @@
 using System;
-using Unity.Build;
+using System.Collections.Generic;
+using Unity.Collections;
 using Unity.Entities;
 using Unity.Entities.Serialization;
+using Unity.Build;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using AssetImportContext = UnityEditor.Experimental.AssetImporters.AssetImportContext;
 
 namespace Unity.Scenes.Editor
 {
-    [UnityEditor.Experimental.AssetImporters.ScriptedImporter(71, "extDontMatter")]
+    [UnityEditor.Experimental.AssetImporters.ScriptedImporter(73, "extDontMatter")]
     [InitializeOnLoad]
     class SubSceneImporter : UnityEditor.Experimental.AssetImporters.ScriptedImporter
     {
@@ -17,52 +19,59 @@ namespace Unity.Scenes.Editor
             EntityScenesPaths.SubSceneImporterType = typeof(SubSceneImporter);
         }
 
-        static unsafe EntityScenesPaths.SceneWithBuildSettingsGUIDs ReadSceneWithBuildSettings(string path)
+        static unsafe NativeList<RuntimeGlobalObjectId> ReferencedUnityObjectsToRuntimeGlobalObjectIds(ReferencedUnityObjects referencedUnityObjects, Allocator allocator = Allocator.Temp)
         {
-            EntityScenesPaths.SceneWithBuildSettingsGUIDs sceneWithBuildSettings = default;
-            using (var reader = new StreamBinaryReader(path, sizeof(EntityScenesPaths.SceneWithBuildSettingsGUIDs)))
+            var globalObjectIds = new GlobalObjectId[referencedUnityObjects.Array.Length];
+            var runtimeGlobalObjIDs = new NativeList<RuntimeGlobalObjectId>(globalObjectIds.Length, allocator);
+
+            GlobalObjectId.GetGlobalObjectIdsSlow(referencedUnityObjects.Array, globalObjectIds);
+
+            for (int i = 0; i != globalObjectIds.Length; i++)
             {
-                reader.ReadBytes(&sceneWithBuildSettings, sizeof(EntityScenesPaths.SceneWithBuildSettingsGUIDs));
+                var globalObjectId = globalObjectIds[i];
+
+                //@TODO: HACK (Object is a scene object)
+                if (globalObjectId.identifierType == 2)
+                {
+                    Debug.LogWarning($"{referencedUnityObjects.Array[i]} is part of a scene, LiveLink can't transfer scene objects. (Note: LiveConvertSceneView currently triggers this)");
+                    continue;
+                }
+
+                if (globalObjectId.assetGUID == new GUID())
+                {
+                    //@TODO: How do we handle this
+                    Debug.LogWarning($"{referencedUnityObjects.Array[i]} has no valid GUID. LiveLink currently does not support built-in assets.");
+                    continue;
+                }
+
+                var runtimeGlobalObjectId =
+                    System.Runtime.CompilerServices.Unsafe.AsRef<RuntimeGlobalObjectId>(&globalObjectId);
+                runtimeGlobalObjIDs.Add(runtimeGlobalObjectId);
             }
-            return sceneWithBuildSettings;
+
+            return runtimeGlobalObjIDs;
         }
 
-        public static void ConvertToBuild(GUID buildSettingSceneGuid, UnityEditor.Build.Pipeline.Tasks.CalculateCustomDependencyData task)
+        static void WriteRefGuids(List<ReferencedUnityObjects> referencedUnityObjects, SceneSectionData[] sectionData, AssetImportContext ctx)
         {
-            var buildSettingScenePath = AssetDatabase.GUIDToAssetPath(buildSettingSceneGuid.ToString());
-            var sceneWithBuildSettings = ReadSceneWithBuildSettings(buildSettingScenePath);
-
-            var hash = UnityEditor.Experimental.AssetDatabaseExperimental.GetArtifactHash(buildSettingSceneGuid.ToString(), typeof(SubSceneImporter));
-            string[] paths;
-            if (!UnityEditor.Experimental.AssetDatabaseExperimental.GetArtifactPaths(hash, out paths))
-                return;
-
-            foreach (var path in paths)
+            for (var index = 0; index < referencedUnityObjects.Count; index++)
             {
-                var ext = System.IO.Path.GetExtension(path).Replace(".", "");
-                if (ext == EntityScenesPaths.GetExtension(EntityScenesPaths.PathType.EntitiesHeader))
-                {
-                    var loadPath = EntityScenesPaths.GetLoadPath(sceneWithBuildSettings.SceneGUID, EntityScenesPaths.PathType.EntitiesHeader, -1);
-                    System.IO.File.Copy(path, loadPath, true);
+                var sectionIndex = sectionData[index].SubSectionIndex;
+
+                var objRefs = referencedUnityObjects[index];
+                if (objRefs == null)
                     continue;
+
+                var refGuidsPath = ctx.GetResultPath($"{sectionIndex}.{EntityScenesPaths.GetExtension(EntityScenesPaths.PathType.EntitiesUnityObjectRefGuids)}");
+                var runtimeGlobalObjectIds = ReferencedUnityObjectsToRuntimeGlobalObjectIds(objRefs);
+
+                using (var refGuidWriter = new StreamBinaryWriter(refGuidsPath))
+                {
+                    refGuidWriter.Write(runtimeGlobalObjectIds.Length);
+                    refGuidWriter.WriteArray(runtimeGlobalObjectIds.AsArray());
                 }
 
-                if (ext == EntityScenesPaths.GetExtension(EntityScenesPaths.PathType.EntitiesBinary))
-                {
-                    var sectionIndex = EntityScenesPaths.GetSectionIndexFromPath(path);
-                    var loadPath = EntityScenesPaths.GetLoadPath(sceneWithBuildSettings.SceneGUID, EntityScenesPaths.PathType.EntitiesBinary, sectionIndex);
-                    System.IO.File.Copy(path, loadPath, true);
-                    continue;
-                }
-
-                if (ext == EntityScenesPaths.GetExtension(EntityScenesPaths.PathType.EntitiesUnityObjectReferences))
-                {
-                    var sectionIndex = EntityScenesPaths.GetSectionIndexFromPath(path);
-                    task.GetObjectIdentifiersAndTypesForSerializedFile(path, out UnityEditor.Build.Content.ObjectIdentifier[] objectIds, out System.Type[] types);
-                    var bundlePath = EntityScenesPaths.GetLoadPath(sceneWithBuildSettings.SceneGUID, EntityScenesPaths.PathType.EntitiesUnityObjectReferences, sectionIndex);
-                    var bundleName = System.IO.Path.GetFileName(bundlePath);
-                    task.CreateAssetEntryForObjectIdentifiers(objectIds, path, bundleName, bundleName, typeof(ReferencedUnityObjects));
-                }
+                runtimeGlobalObjectIds.Dispose();
             }
         }
 
@@ -72,18 +81,18 @@ namespace Unity.Scenes.Editor
             {
                 ctx.DependsOnCustomDependency("EntityBinaryFileFormatVersion");
 
-                var sceneWithBuildSettings = ReadSceneWithBuildSettings(ctx.assetPath);
+                var sceneWithBuildConfiguration = SceneWithBuildConfigurationGUIDs.ReadFromFile(ctx.assetPath);
 
                 // Ensure we have as many dependencies as possible registered early in case an exception is thrown
-                var scenePath = AssetDatabase.GUIDToAssetPath(sceneWithBuildSettings.SceneGUID.ToString());
+                var scenePath = AssetDatabase.GUIDToAssetPath(sceneWithBuildConfiguration.SceneGUID.ToString());
                 ctx.DependsOnSourceAsset(scenePath);
 
-                if (sceneWithBuildSettings.BuildSettings.IsValid)
+                if (sceneWithBuildConfiguration.BuildConfiguration.IsValid)
                 {
-                    var buildSettingPath = AssetDatabase.GUIDToAssetPath(sceneWithBuildSettings.BuildSettings.ToString());
-                    ctx.DependsOnSourceAsset(buildSettingPath);
-                    var buildSettingDependencies = AssetDatabase.GetDependencies(buildSettingPath);
-                    foreach (var dependency in buildSettingDependencies)
+                    var buildConfigurationPath = AssetDatabase.GUIDToAssetPath(sceneWithBuildConfiguration.BuildConfiguration.ToString());
+                    ctx.DependsOnSourceAsset(buildConfigurationPath);
+                    var buildConfigurationDependencies = AssetDatabase.GetDependencies(buildConfigurationPath);
+                    foreach (var dependency in buildConfigurationDependencies)
                         ctx.DependsOnSourceAsset(dependency);
                 }
 
@@ -94,7 +103,7 @@ namespace Unity.Scenes.Editor
                         ctx.DependsOnSourceAsset(dependency);
                 }
 
-                var buildSettings = BuildSettings.LoadAsset(sceneWithBuildSettings.BuildSettings);
+                var config = BuildConfiguration.LoadAsset(sceneWithBuildConfiguration.BuildConfiguration);
 
                 var scene = EditorSceneManager.OpenScene(scenePath, OpenSceneMode.Additive);
 
@@ -102,11 +111,14 @@ namespace Unity.Scenes.Editor
                 {
                     var settings = new GameObjectConversionSettings();
 
-                    settings.SceneGUID = sceneWithBuildSettings.SceneGUID;
-                    settings.BuildSettings = buildSettings;
+                    settings.SceneGUID = sceneWithBuildConfiguration.SceneGUID;
+                    settings.BuildConfiguration = config;
                     settings.AssetImportContext = ctx;
+                    settings.FilterFlags = WorldSystemFilterFlags.HybridGameObjectConversion;
 
-                    EditorEntityScenes.WriteEntityScene(scene, settings);
+                    var sectionRefObjs = new List<ReferencedUnityObjects>();
+                    var sectionData = EditorEntityScenes.ConvertAndWriteEntityScene(scene, settings, sectionRefObjs);
+                    WriteRefGuids(sectionRefObjs, sectionData, ctx);
                 }
                 finally
                 {
@@ -115,7 +127,7 @@ namespace Unity.Scenes.Editor
             }
             // Currently it's not acceptable to let the asset database catch the exception since it will create a default asset without any dependencies
             // This means a reimport will not be triggered if the scene is subsequently modified
-            catch(Exception e)
+            catch (Exception e)
             {
                 Debug.Log($"Exception thrown during SubScene import: {e}");
             }

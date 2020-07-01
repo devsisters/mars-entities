@@ -12,16 +12,25 @@ namespace Unity.Scenes.Editor
     {
         //@TODO: Multi-world connection support...
         Dictionary<int, LiveLinkConnection> _Connections = new Dictionary<int, LiveLinkConnection>();
-        
+
         // Temp data cached to reduce gc allocations
         List<LiveLinkChangeSet>             _ChangeSets = new List<LiveLinkChangeSet>();
         NativeList<Hash128>                 _UnloadScenes;
         NativeList<Hash128>                 _LoadScenes;
+        IEditorConnection m_Connection;
 
         internal event Action<int, Hash128> LiveLinkPlayerConnected;
         internal event Action<int> LiveLinkPlayerDisconnected;
 
-        unsafe void SetLoadedScenes(MessageEventArgs args)
+        internal void SetConnection(IEditorConnection connection)
+        {
+            var newConnection = connection ?? throw new ArgumentNullException(nameof(connection));
+            TearDownConnection();
+            m_Connection = newConnection;
+            SetupConnection();
+        }
+
+        void SetLoadedScenes(MessageEventArgs args)
         {
             if (!_Connections.TryGetValue(args.playerId, out var connection))
             {
@@ -35,28 +44,35 @@ namespace Unity.Scenes.Editor
             msg.Dispose();
         }
 
+        void RequestSessionHandshake(MessageEventArgs args)
+        {
+            m_Connection.Send(LiveLinkMsg.EditorResponseHandshakeLiveLink, LiveLinkUtility.GetEditorLiveLinkId(), args.playerId);
+        }
+
         void ConnectLiveLink(MessageEventArgs args)
         {
             LiveLinkMsg.LogReceived("ConnectLiveLink");
 
             int player = args.playerId;
-            var buildSettings = args.Receive<Hash128>();
+            var buildConfigurationGuid = args.Receive<Hash128>();
 
             //@TODO: Implement this properly
             //system.World.GetExistingSystem<EditorSubSceneLiveLinkSystem>().CleanupAllScenes();
 
             //@TODO: How does this work with multiple connections?
-            LiveLinkAssetBundleBuildSystem.instance.ClearUsedAssetsTargetHash();
+            LiveLinkAssetBundleBuildSystem.instance.ClearTrackedAssets();
             if (_Connections.TryGetValue(player, out var connection))
                 connection.Dispose();
 
-            var newConnection = new LiveLinkConnection(buildSettings);
+            var newConnection = new LiveLinkConnection(buildConfigurationGuid);
             _Connections[player] = newConnection;
+            using (var scenes = newConnection.GetInitialScenes(player, Allocator.Temp))
+                m_Connection.SendArray(LiveLinkMsg.EditorResponseConnectLiveLink, scenes, player);
 
             TimeBasedCallbackInvoker.SetCallback(DetectSceneChanges);
             EditorUpdateUtility.EditModeQueuePlayerLoopUpdate();
 
-            LiveLinkPlayerConnected?.Invoke(player, newConnection._BuildSettingsGUID);
+            LiveLinkPlayerConnected?.Invoke(player, newConnection._BuildConfigurationGUID);
         }
 
         void OnPlayerConnected(int playerID)
@@ -74,7 +90,6 @@ namespace Unity.Scenes.Editor
                 _Connections.Remove(playerID);
                 LiveLinkPlayerDisconnected?.Invoke(playerID);
             }
-
         }
 
         internal void DisableSendForPlayer(int playerId)
@@ -83,40 +98,40 @@ namespace Unity.Scenes.Editor
                 connection._IsEnabled = false;
         }
 
-        static void SendChangeSet(LiveLinkChangeSet entityChangeSet, int playerID)
+        void SendChangeSet(LiveLinkChangeSet entityChangeSet, int playerID)
         {
             var buffer = entityChangeSet.Serialize();
             LiveLinkMsg.LogSend($"EntityChangeSet patch: '{buffer.Length}' bytes, scene '{entityChangeSet.SceneGUID}'");
-            EditorConnection.instance.Send(LiveLinkMsg.ReceiveEntityChangeSet, buffer, playerID);
+            m_Connection.Send(LiveLinkMsg.EditorReceiveEntityChangeSet, buffer, playerID);
         }
-        
-        static void SendUnloadScenes(NativeArray<Hash128> unloadScenes, int playerID)
+
+        void SendUnloadScenes(NativeArray<Hash128> unloadScenes, int playerID)
         {
             if (unloadScenes.Length == 0)
                 return;
 
             LiveLinkMsg.LogSend($"UnloadScenes {unloadScenes.ToDebugString()}");
-            EditorConnection.instance.SendArray(LiveLinkMsg.UnloadScenes, unloadScenes, playerID);
+            m_Connection.SendArray(LiveLinkMsg.EditorUnloadScenes, unloadScenes, playerID);
         }
 
-        static void SendLoadScenes(NativeArray<Hash128> loadScenes, int playerID)
+        void SendLoadScenes(NativeArray<Hash128> loadScenes, int playerID)
         {
             if (loadScenes.Length == 0)
                 return;
 
             LiveLinkMsg.LogSend($"LoadScenes {loadScenes.ToDebugString()}");
-            EditorConnection.instance.SendArray(LiveLinkMsg.LoadScenes, loadScenes, playerID);
+            m_Connection.SendArray(LiveLinkMsg.EditorLoadScenes, loadScenes, playerID);
         }
 
-        internal Hash128 GetBuildSettingsGUIDForLiveLinkConnection(int playerConnectionId)
-            => _Connections.TryGetValue(playerConnectionId, out var connection) ? connection._BuildSettingsGUID : default;
+        internal Hash128 GetBuildConfigurationGUIDForLiveLinkConnection(int playerConnectionId)
+            => _Connections.TryGetValue(playerConnectionId, out var connection) ? connection._BuildConfigurationGUID : default;
 
         void DetectSceneChanges()
         {
             if (_Connections.Count == 0)
             {
                 TimeBasedCallbackInvoker.ClearCallback(DetectSceneChanges);
-                LiveLinkAssetBundleBuildSystem.instance.ClearUsedAssetsTargetHash();
+                LiveLinkAssetBundleBuildSystem.instance.ClearTrackedAssets();
                 return;
             }
 
@@ -128,14 +143,13 @@ namespace Unity.Scenes.Editor
 
                 try
                 {
-
                     connection.Update(_ChangeSets, _LoadScenes, _UnloadScenes, LiveLinkMode.LiveConvertGameView);
 
                     // Load scenes that are not being edited live
                     SendLoadScenes(_LoadScenes.AsArray(), c.Key);
                     // Unload scenes that are no longer being edited / need to be reloaded etc
                     SendUnloadScenes(_UnloadScenes.AsArray(), c.Key);
-                    
+
                     // Apply changes to scenes that are being edited
                     foreach (var change in _ChangeSets)
                     {
@@ -152,45 +166,61 @@ namespace Unity.Scenes.Editor
             }
         }
 
-        void OnEnable()
+        void SetupConnection()
         {
-            _UnloadScenes = new NativeList<Hash128>(Allocator.Persistent);
-            _LoadScenes = new NativeList<Hash128>(Allocator.Persistent);
+            if (m_Connection == null)
+                return;
 
-            EditorConnection.instance.Register(LiveLinkMsg.ConnectLiveLink, ConnectLiveLink);
-            EditorConnection.instance.Register(LiveLinkMsg.SetLoadedScenes, SetLoadedScenes);
-            EditorConnection.instance.RegisterConnection(OnPlayerConnected);
-            EditorConnection.instance.RegisterDisconnection(OnPlayerDisconnected);
+            m_Connection.Register(LiveLinkMsg.PlayerRequestHandshakeLiveLink, RequestSessionHandshake);
+            m_Connection.Register(LiveLinkMsg.PlayerRequestConnectLiveLink, ConnectLiveLink);
+            m_Connection.Register(LiveLinkMsg.PlayerSetLoadedScenes, SetLoadedScenes);
+            m_Connection.RegisterConnection(OnPlayerConnected);
+            m_Connection.RegisterDisconnection(OnPlayerDisconnected);
 
             // After domain reload we need to reconnect all data to the player.
             // Optimally we would keep all state alive across domain reload...
             LiveLinkMsg.LogSend("ResetGame");
-            EditorConnection.instance.Send(LiveLinkMsg.ResetGame, new byte[0]);
+            m_Connection.Send(LiveLinkMsg.EditorResetGame, new byte[0]);
         }
 
-        void OnDisable()
+        void OnEnable()
         {
-            EditorConnection.instance.Unregister(LiveLinkMsg.ConnectLiveLink, ConnectLiveLink);
-            EditorConnection.instance.Unregister(LiveLinkMsg.SetLoadedScenes, SetLoadedScenes);
-            EditorConnection.instance.UnregisterConnection(OnPlayerConnected);
-            EditorConnection.instance.UnregisterDisconnection(OnPlayerDisconnected);
+            _UnloadScenes = new NativeList<Hash128>(Allocator.Persistent);
+            _LoadScenes = new NativeList<Hash128>(Allocator.Persistent);
+            var conn = new EditorPlayerConnection(EditorConnection.instance);
+            SetConnection(conn);
+        }
+
+        void TearDownConnection()
+        {
+            if (m_Connection == null)
+                return;
+            m_Connection.Unregister(LiveLinkMsg.PlayerRequestHandshakeLiveLink, RequestSessionHandshake);
+            m_Connection.Unregister(LiveLinkMsg.PlayerRequestConnectLiveLink, ConnectLiveLink);
+            m_Connection.Unregister(LiveLinkMsg.PlayerSetLoadedScenes, SetLoadedScenes);
+            m_Connection.UnregisterConnection(OnPlayerConnected);
+            m_Connection.UnregisterDisconnection(OnPlayerDisconnected);
 
             foreach (var connection in _Connections)
                 connection.Value.Dispose();
             _Connections.Clear();
+        }
 
+        void OnDisable()
+        {
+            TearDownConnection();
             _UnloadScenes.Dispose();
             _LoadScenes.Dispose();
         }
 
         internal void ResetAllPlayers()
         {
-            EditorConnection.instance.Send(LiveLinkMsg.ResetGame, new byte[0]);
+            m_Connection.Send(LiveLinkMsg.EditorResetGame, new byte[0]);
         }
 
         internal void ResetPlayer(int playerId)
         {
-            EditorConnection.instance.Send(LiveLinkMsg.ResetGame, new byte[0], playerId);
+            m_Connection.Send(LiveLinkMsg.EditorResetGame, new byte[0], playerId);
         }
     }
 }

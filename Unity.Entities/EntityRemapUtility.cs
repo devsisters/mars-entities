@@ -18,12 +18,6 @@ namespace Unity.Entities
             public Entity Target;
         }
 
-        public struct SparseEntityRemapInfo
-        {
-            public Entity Src;
-            public Entity Target;
-        }
-
         public static void GetTargets(out NativeArray<Entity> output, NativeArray<EntityRemapInfo> remapping)
         {
             NativeArray<Entity> temp = new NativeArray<Entity>(remapping.Length, Allocator.TempJob);
@@ -58,14 +52,14 @@ namespace Unity.Entities
             }
         }
 
-        public static Entity RemapEntityForPrefab(SparseEntityRemapInfo* remapping, int remappingCount, Entity source)
+        public static Entity RemapEntityForPrefab(Entity* remapSrc, Entity* remapDst, int remappingCount, Entity source)
         {
             // When instantiating prefabs,
             // internal references are remapped.
             for (int i = 0; i != remappingCount; i++)
             {
-                if (source == remapping[i].Src)
-                    return remapping[i].Target;
+                if (source == remapSrc[i])
+                    return remapDst[i];
             }
             // And external references are kept.
             return source;
@@ -149,13 +143,13 @@ namespace Unity.Entities
                 {
                     if (field.FieldType.IsValueType && !field.FieldType.IsPrimitive)
                         CalculateEntityOffsetsRecurse(ref offsets, field.FieldType, baseOffset + UnsafeUtility.GetFieldOffset(field));
-                    else if(field.FieldType.IsClass && field.FieldType.IsGenericType)
+                    else if (field.FieldType.IsClass && field.FieldType.IsGenericType)
                     {
-                        foreach(var ga in field.FieldType.GetGenericArguments())
+                        foreach (var ga in field.FieldType.GetGenericArguments())
                         {
                             if (ga == typeof(Entity))
                             {
-                                offsets.Add(new EntityOffsetInfo { Offset = baseOffset }); 
+                                offsets.Add(new EntityOffsetInfo { Offset = baseOffset });
                                 break;
                             }
                         }
@@ -258,7 +252,7 @@ namespace Unity.Entities
 
         public static void PatchEntitiesForPrefab(EntityPatchInfo* scalarPatches, int scalarPatchCount,
             BufferEntityPatchInfo* bufferPatches, int bufferPatchCount,
-            byte* chunkBuffer, int indexInChunk, int entityCount, SparseEntityRemapInfo* remapping, int remappingCount)
+            byte* chunkBuffer, int indexInChunk, int entityCount, Entity* remapSrc, Entity* remapDst, int remappingCount)
         {
             // Patch scalars (single components) with entity references.
             for (int p = 0; p < scalarPatchCount; p++)
@@ -267,7 +261,7 @@ namespace Unity.Entities
                 for (int e = 0; e != entityCount; e++)
                 {
                     Entity* entity = (Entity*)(entityData + scalarPatches[p].Stride * (e + indexInChunk));
-                    *entity = RemapEntityForPrefab(remapping + e * remappingCount, remappingCount, *entity);
+                    *entity = RemapEntityForPrefab(remapSrc, remapDst + e * remappingCount, remappingCount, *entity);
                 }
             }
 
@@ -286,159 +280,11 @@ namespace Unity.Entities
                     for (int k = 0; k != elemCount; ++k)
                     {
                         Entity* entityPtr = (Entity*)elemsBase;
-                        *entityPtr = RemapEntityForPrefab(remapping + e * remappingCount, remappingCount, *entityPtr);
+                        *entityPtr = RemapEntityForPrefab(remapSrc, remapDst + e * remappingCount, remappingCount, *entityPtr);
                         elemsBase += bufferPatches[p].ElementStride;
                     }
                 }
             }
         }
-
-#if !NET_DOTS
-        internal static void PatchEntityInBoxedType(object container, EntityRemapInfo* remapInfo)
-        {
-            var visitor = new EntityRemappingVisitor(remapInfo);
-            var changeTracker = new ChangeTracker();
-            var type = container.GetType();
-
-            var resolved = PropertyBagResolver.Resolve(type);
-            if (resolved != null)
-            {
-                resolved.Accept(ref container, ref visitor, ref changeTracker);
-            }
-            else
-                throw new ArgumentException($"Type '{type.FullName}' not supported for visiting.");
-        }
-
-        internal static void PatchEntityForPrefabInBoxedType(object container, SparseEntityRemapInfo* remapInfo, int remapInfoCount)
-        {
-            var visitor = new EntityRemappingVisitor(remapInfo, remapInfoCount);
-            var changeTracker = new ChangeTracker();
-            var type = container.GetType();
-
-            var resolved = PropertyBagResolver.Resolve(type);
-            if (resolved != null)
-            {
-                resolved.Accept(ref container, ref visitor, ref changeTracker);
-            }
-            else
-                throw new ArgumentException($"Type '{type.FullName}' not supported for visiting.");
-        }
-
-        internal unsafe class EntityRemappingVisitor : PropertyVisitor
-        {
-            protected EntityRemappingAdapter _EntityRemapAdapter { get; }
-            protected EntityRemappingForPrefabAdapter _EntityRemapForPrefabAdapter { get; }
-
-            public EntityRemappingVisitor(EntityRemapUtility.EntityRemapInfo* remapInfo)
-            {
-                _EntityRemapAdapter = new EntityRemappingAdapter(remapInfo);
-                AddAdapter(_EntityRemapAdapter);
-            }
-
-            public EntityRemappingVisitor(EntityRemapUtility.SparseEntityRemapInfo* remapInfo, int remapInfoCount)
-            {
-                _EntityRemapForPrefabAdapter = new EntityRemappingForPrefabAdapter(remapInfo, remapInfoCount);
-                AddAdapter(_EntityRemapForPrefabAdapter);
-            }
-        }
-
-        internal unsafe class EntityRemappingAdapter : IPropertyVisitorAdapter
-            , IVisitAdapter<Entity>
-            , IVisitAdapter
-            , IVisitCollectionAdapter
-            , IVisitContainerAdapter
-        {
-            protected EntityRemapUtility.EntityRemapInfo* RemapInfo { get; }
-
-            unsafe public EntityRemappingAdapter(EntityRemapUtility.EntityRemapInfo* remapInfo)
-            {
-                RemapInfo = remapInfo;
-            }
-
-            unsafe public VisitStatus Visit<TProperty, TContainer>(IPropertyVisitor visitor, TProperty property, ref TContainer container, ref Entity value, ref ChangeTracker changeTracker)
-                where TProperty : IProperty<TContainer, Entity>
-            {
-                value = EntityRemapUtility.RemapEntity(RemapInfo, value);
-                return VisitStatus.Handled;
-            }
-
-            public VisitStatus Visit<TProperty, TContainer, TValue>(IPropertyVisitor visitor, TProperty property, ref TContainer container, ref TValue value, ref ChangeTracker changeTracker) where TProperty : IProperty<TContainer, TValue>
-            {
-                return VisitStatus.Unhandled;
-            }
-
-            public VisitStatus BeginCollection<TProperty, TContainer, TValue>(IPropertyVisitor visitor, TProperty property, ref TContainer container, ref TValue value, ref ChangeTracker changeTracker) where TProperty : ICollectionProperty<TContainer, TValue>
-            {
-                if (value == null)
-                    return VisitStatus.Override;
-                return VisitStatus.Unhandled;
-            }
-
-            public void EndCollection<TProperty, TContainer, TValue>(IPropertyVisitor visitor, TProperty property, ref TContainer container, ref TValue value, ref ChangeTracker changeTracker) where TProperty : ICollectionProperty<TContainer, TValue>
-            {
-            }
-
-            public VisitStatus BeginContainer<TProperty, TValue, TContainer>(IPropertyVisitor visitor, TProperty property, ref TContainer container, ref TValue value, ref ChangeTracker changeTracker) where TProperty : IProperty<TContainer, TValue>
-            {
-                if (value == null)
-                    return VisitStatus.Override;
-                return VisitStatus.Unhandled;
-            }
-
-            public void EndContainer<TProperty, TValue, TContainer>(IPropertyVisitor visitor, TProperty property, ref TContainer container, ref TValue value, ref ChangeTracker changeTracker) where TProperty : IProperty<TContainer, TValue>
-            {
-            }
-        }
-
-        internal unsafe class EntityRemappingForPrefabAdapter : IPropertyVisitorAdapter
-            , IVisitAdapter<Entity>
-            , IVisitAdapter
-            , IVisitCollectionAdapter
-            , IVisitContainerAdapter
-        {
-            protected EntityRemapUtility.SparseEntityRemapInfo* RemapInfo { get; }
-            protected int RemapInfoCount { get; }
-
-            unsafe public EntityRemappingForPrefabAdapter(EntityRemapUtility.SparseEntityRemapInfo* remapInfo, int remapInfoCount)
-            {
-                RemapInfo = remapInfo;
-                RemapInfoCount = remapInfoCount;
-            }
-
-            unsafe public VisitStatus Visit<TProperty, TContainer>(IPropertyVisitor visitor, TProperty property, ref TContainer container, ref Entity value, ref ChangeTracker changeTracker)
-                where TProperty : IProperty<TContainer, Entity>
-            {
-                value = EntityRemapUtility.RemapEntityForPrefab(RemapInfo, RemapInfoCount, value);
-                return VisitStatus.Handled;
-            }
-
-            public VisitStatus Visit<TProperty, TContainer, TValue>(IPropertyVisitor visitor, TProperty property, ref TContainer container, ref TValue value, ref ChangeTracker changeTracker) where TProperty : IProperty<TContainer, TValue>
-            {
-                return VisitStatus.Unhandled;
-            }
-            
-            public VisitStatus BeginCollection<TProperty, TContainer, TValue>(IPropertyVisitor visitor, TProperty property, ref TContainer container, ref TValue value, ref ChangeTracker changeTracker) where TProperty : ICollectionProperty<TContainer, TValue>
-            {
-                if (value == null)
-                    return VisitStatus.Override;
-                return VisitStatus.Unhandled;
-            }
-
-            public void EndCollection<TProperty, TContainer, TValue>(IPropertyVisitor visitor, TProperty property, ref TContainer container, ref TValue value, ref ChangeTracker changeTracker) where TProperty : ICollectionProperty<TContainer, TValue>
-            {
-            }
-            
-            public VisitStatus BeginContainer<TProperty, TValue, TContainer>(IPropertyVisitor visitor, TProperty property, ref TContainer container, ref TValue value, ref ChangeTracker changeTracker) where TProperty : IProperty<TContainer, TValue>
-            {
-                if (value == null)
-                    return VisitStatus.Override;
-                return VisitStatus.Unhandled;
-            }
-
-            public void EndContainer<TProperty, TValue, TContainer>(IPropertyVisitor visitor, TProperty property, ref TContainer container, ref TValue value, ref ChangeTracker changeTracker) where TProperty : IProperty<TContainer, TValue>
-            {
-            }
-        }
-#endif
     }
 }

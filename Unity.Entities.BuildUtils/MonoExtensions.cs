@@ -4,7 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Mono.Cecil;
-using Unity.IL2CPP.ILPreProcessor;
+using Unity.Cecil.Awesome;
 
 namespace Unity.Entities.BuildUtils
 {
@@ -146,7 +146,6 @@ namespace Unity.Entities.BuildUtils
             return true;
         }
 
-
         public static bool IsComplex(this TypeReference typeRef)
         {
             // We must check this before calling Resolve() as cecil loses this property otherwise
@@ -206,9 +205,9 @@ namespace Unity.Entities.BuildUtils
                 return false;
 
             return typeRef.Resolve().Interfaces.Any(i => i.InterfaceType.Name == "IComponentData") ||
-                   IsSharedComponentType(typeRef) ||
-                   IsSystemStateComponentType(typeRef) ||
-                   IsBufferElementComponentType(typeRef);
+                IsSharedComponentType(typeRef) ||
+                IsSystemStateComponentType(typeRef) ||
+                IsBufferElementComponentType(typeRef);
         }
 
         public static bool IsBufferElementComponentType(this TypeReference typeRef)

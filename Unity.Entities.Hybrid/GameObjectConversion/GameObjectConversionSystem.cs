@@ -1,4 +1,5 @@
 using System;
+using System.ComponentModel;
 using System.IO;
 using Unity.Entities;
 using Unity.Entities.Conversion;
@@ -11,23 +12,23 @@ using UnityObject = UnityEngine.Object;
 //{
 [DisableAutoCreation]
 [WorldSystemFilter(WorldSystemFilterFlags.GameObjectConversion)]
-public class GameObjectDeclareReferencedObjectsGroup : ComponentSystemGroup { }
+public class GameObjectDeclareReferencedObjectsGroup : ComponentSystemGroup {}
 
 [DisableAutoCreation]
 [WorldSystemFilter(WorldSystemFilterFlags.GameObjectConversion)]
-public class GameObjectBeforeConversionGroup : ComponentSystemGroup { }
+public class GameObjectBeforeConversionGroup : ComponentSystemGroup {}
 
 [DisableAutoCreation]
 [WorldSystemFilter(WorldSystemFilterFlags.GameObjectConversion)]
-public class GameObjectConversionGroup : ComponentSystemGroup { }
+public class GameObjectConversionGroup : ComponentSystemGroup {}
 
 [DisableAutoCreation]
 [WorldSystemFilter(WorldSystemFilterFlags.GameObjectConversion)]
-public class GameObjectAfterConversionGroup : ComponentSystemGroup { }
+public class GameObjectAfterConversionGroup : ComponentSystemGroup {}
 
 [DisableAutoCreation]
 [WorldSystemFilter(WorldSystemFilterFlags.GameObjectConversion)]
-public class GameObjectExportGroup : ComponentSystemGroup { }
+public class GameObjectExportGroup : ComponentSystemGroup {}
 
 /// <summary>
 /// Derive from this class to create a system that can convert GameObjects and assets into Entities.
@@ -62,13 +63,14 @@ public abstract partial class GameObjectConversionSystem : ComponentSystem
 
     /// <summary>
     /// ShouldRunConversionSystem gives a GameObjectConversionSystem an early chance to decide whether it should run given
-    /// the specified build settings.  The base implementation will check whether the assembly that the system is in
+    /// the specified build configuration.  The base implementation will check whether the assembly that the system is in
     /// has been explicitly filtered out.  Overriding methods should return false if the base implementation returns false.
     /// </summary>
     public virtual bool ShouldRunConversionSystem()
     {
         return ShouldRunConversionSystem(this.GetType());
     }
+
 #endif
 
     // ** DISCOVERY **
@@ -97,14 +99,35 @@ public abstract partial class GameObjectConversionSystem : ComponentSystem
     public void DeclareLinkedEntityGroup(GameObject gameObject)
         => m_MappingSystem.DeclareLinkedEntityGroup(gameObject);
 
+    /// <summary>
+    /// Declares that the conversion result of the target GameObject depends on another GameObject. Any changes to the
+    /// dependency should trigger a reconversion of the dependent GameObject.
+    /// </summary>
+    /// <param name="target">The GameObject that has a dependency.</param>
+    /// <param name="dependsOn">The GameObject that the target depends on.</param>
     public void DeclareDependency(GameObject target, GameObject dependsOn) =>
-        m_MappingSystem.DeclareDependency(target, dependsOn);
+        m_MappingSystem.Dependencies.DependOnGameObject(target, dependsOn);
 
+    /// <summary>
+    /// Declares that the conversion result of the target Component depends on another component. Any changes to the
+    /// dependency should trigger a reconversion of the dependent component.
+    /// </summary>
+    /// <param name="target">The Component that has a dependency.</param>
+    /// <param name="dependsOn">The Component that the target depends on.</param>
     public void DeclareDependency(Component target, Component dependsOn)
     {
         if (target != null && dependsOn != null)
-            m_MappingSystem.DeclareDependency(target.gameObject, dependsOn.gameObject);
+            m_MappingSystem.Dependencies.DependOnGameObject(target.gameObject, dependsOn.gameObject);
     }
+
+    /// <summary>
+    /// Declares that the conversion result of the target GameObject depends on a source asset. Any changes to the
+    /// source asset should trigger a reconversion of the dependent GameObject.
+    /// </summary>
+    /// <param name="target">The GameObject that has a dependency.</param>
+    /// <param name="dependsOn">The Object that the target depends on. This must be an asset.</param>
+    public void DeclareAssetDependency(GameObject target, UnityObject dependsOn) =>
+        m_MappingSystem.Dependencies.DependOnAsset(target, dependsOn);
 
     // ** CONVERSION **
 
@@ -123,6 +146,17 @@ public abstract partial class GameObjectConversionSystem : ComponentSystem
     public Entity GetPrimaryEntity(Component component) =>
         m_MappingSystem.GetPrimaryEntity(component != null ? component.gameObject : null);
 
+    /// <summary>
+    /// Gets the entity representing the scene section of the entity passed in, the section entity is created if it doesn't already exist.
+    /// Metadata components added to this section entity will be serialized into the entity scene header.
+    /// At runtime these components will be added to the scene section entities when the scene is resolved.
+    /// Only struct IComponentData components without BlobAssetReferences or Entity members are supported.
+    /// </summary>
+    /// <param name="entity">The entity for which to get the scene section entity</param>
+    /// <returns>The entity representing the scene section</returns>
+    public Entity GetSceneSectionEntity(Entity entity) =>
+        m_MappingSystem.GetSceneSectionEntity(entity);
+
     public Entity CreateAdditionalEntity(UnityObject uobject) =>
         m_MappingSystem.CreateAdditionalEntity(uobject);
     public Entity CreateAdditionalEntity(Component component) =>
@@ -137,24 +171,18 @@ public abstract partial class GameObjectConversionSystem : ComponentSystem
 
 #if UNITY_EDITOR
     /// <summary>
-    /// Get an IBuildSettingsComponent of the given type from the current build settings.  If there are
-    /// no current build settings, the default value is returned.  Otherwise, the component must exist
-    /// in the build settings or an exception is raised.
+    /// Get an <see cref="Unity.Build.IBuildComponent"/> of the given type from the current build configuration. If there are
+    /// no current build configuration, the default value is returned. Otherwise, the component must exist
+    /// in the build configuration or an exception is raised.
     /// </summary>
-    public T GetBuildSettingsComponent<T>() where T : Unity.Build.IBuildSettingsComponent
-    {
-        return m_MappingSystem.GetBuildSettingsComponent<T>();
-    }
+    public T GetBuildConfigurationComponent<T>() where T : Unity.Build.IBuildComponent => m_MappingSystem.GetBuildConfigurationComponent<T>();
 
     /// <summary>
-    /// Try to get an IBuildSettingsComponent of the given type from the current build settings.  If there are
-    /// no current build settings, false and the default value for component are returned.  Otherwise,
-    /// the return value indicates whether the component type was found in the current build settings.
+    /// Try to get an <see cref="Unity.Build.IBuildComponent"/> of the given type from the current build configuration. If there are
+    /// no current build configuration, false and the default value for component are returned. Otherwise,
+    /// the return value indicates whether the component type was found in the current build configuration.
     /// </summary>
-    public bool TryGetBuildSettingsComponent<T>(out T component) where T : Unity.Build.IBuildSettingsComponent
-    {
-        return m_MappingSystem.TryGetBuildSettingsComponent<T>(out component);
-    }
+    public bool TryGetBuildConfigurationComponent<T>(out T component) where T : Unity.Build.IBuildComponent => m_MappingSystem.TryGetBuildConfigurationComponent(out component);
 
     /// <summary>
     /// Returns whether a GameObjectConversionSystem of the given type, or a IConvertGameObjectToEntity
@@ -163,11 +191,11 @@ public abstract partial class GameObjectConversionSystem : ComponentSystem
     /// </summary>
     public bool ShouldRunConversionSystem(Type conversionSystemType)
     {
-        return m_MappingSystem.ShouldRunConversionSystem(conversionSystemType);
+        return m_MappingSystem.ShouldRunConversion(conversionSystemType);
     }
 
     /// <summary>
-    /// Returns whether the current build settings configuration includes the given types at runtime.
+    /// Returns whether the current build configuration includes the given types at runtime.
     /// Typically used in an implementation of GameObjectConversionSystem.ShouldRunConversionSystem,
     /// but can also be used to make more detailed decisions.
     /// </summary>
@@ -177,7 +205,7 @@ public abstract partial class GameObjectConversionSystem : ComponentSystem
     }
 
     /// <summary>
-    /// Returns whether the current build settings configuration includes the given types at runtime.
+    /// Returns whether the current build configuration includes the given types at runtime.
     /// Typically used in an implementation of GameObjectConversionSystem.ShouldRunConversionSystem,
     /// but can also be used to make more detailed decisions.
     /// </summary>
@@ -185,7 +213,8 @@ public abstract partial class GameObjectConversionSystem : ComponentSystem
     {
         return m_MappingSystem.BuildHasType(componentTypes);
     }
-    #endif
+
+#endif
 
     public void AddHybridComponent(UnityEngine.Component component) =>
         m_MappingSystem.AddHybridComponent(component);

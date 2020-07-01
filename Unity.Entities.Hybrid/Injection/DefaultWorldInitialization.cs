@@ -1,4 +1,4 @@
-﻿#if UNITY_DISABLE_AUTOMATIC_SYSTEM_BOOTSTRAP
+#if UNITY_DISABLE_AUTOMATIC_SYSTEM_BOOTSTRAP
 #define UNITY_DISABLE_AUTOMATIC_SYSTEM_BOOTSTRAP_EDITOR_WORLD
 #endif
 
@@ -11,19 +11,6 @@ using Unity.Collections;
 
 namespace Unity.Entities
 {
-    
-    /// <summary>
-    /// When entering playmode or the game starts in the Player.
-    /// A default world is created, sometimes you need multiple worlds to be setup when the game starts.
-    /// This lets you override the bootstrap of game code world creation.
-    /// </summary>
-    public interface ICustomBootstrap
-    {
-        // Returns true if the bootstrap has performed initialization.
-        // Returns false if default world initialization should be performed.
-        bool Initialize(string defaultWorldName);
-    }
-
     public static class DefaultWorldInitialization
     {
         static bool s_UnloadOrPlayModeChangeShutdownRegistered = false;
@@ -39,7 +26,7 @@ namespace Unity.Entities
         internal static event Action DefaultWorldDestroyed;
 
         /// <summary>
-        /// Destroys Editor World when entering Play Mode without Domain Reload. 
+        /// Destroys Editor World when entering Play Mode without Domain Reload.
         /// RuntimeInitializeOnLoadMethod is called before the new scene is loaded, before Awake and OnEnable of MonoBehaviour.
         /// </summary>
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
@@ -95,21 +82,8 @@ namespace Unity.Entities
             DefaultWorldDestroyed?.Invoke();
         }
 
-        static ComponentSystemBase GetOrCreateManagerAndLogException(World world, Type type)
-        {
-            try
-            {
-                return world.GetOrCreateSystem(type);
-            }
-            catch (Exception e)
-            {
-                Debug.LogException(e);
-                return null;
-            }
-        }
-
         /// <summary>
-        /// Initializes the default world or runs ICustomBootstrap if one is is available. 
+        /// Initializes the default world or runs ICustomBootstrap if one is available.
         /// </summary>
         /// <param name="defaultWorldName">The name of the world that will be created. Unless there is a custom bootstrap.</param>
         /// <param name="editorWorld">Editor worlds by default only include systems with [ExecuteAlways]. If editorWorld is true, ICustomBootstrap will not be used.</param>
@@ -124,32 +98,42 @@ namespace Unity.Entities
                     return;
             }
 
-            var world = new World(defaultWorldName);
+            var world = new World(defaultWorldName, editorWorld ? WorldFlags.Editor : WorldFlags.Game);
             World.DefaultGameObjectInjectionWorld = world;
 
             var systems = GetAllSystems(WorldSystemFilterFlags.Default, editorWorld);
 
-            AddSystemsToRootLevelSystemGroups(world, systems);
+            AddSystemsToRootLevelSystemGroups(world, systems.ToArray());
             ScriptBehaviourUpdateOrder.UpdatePlayerLoop(world);
 
             DefaultWorldInitialized?.Invoke(world);
+        }
+
+        public static void AddSystemsToRootLevelSystemGroups(World world, IEnumerable<Type> systemTypes)
+        {
+            AddSystemsToRootLevelSystemGroups(world, systemTypes.ToArray());
         }
 
         /// <summary>
         /// Adds the collection of systems to the world by injecting them into the root level system groups
         /// (InitializationSystemGroup, SimulationSystemGroup and PresentationSystemGroup)
         /// </summary>
-        public static void AddSystemsToRootLevelSystemGroups(World world, IEnumerable<Type> systems)
+        public static void AddSystemsToRootLevelSystemGroups(World world, params Type[] systemTypes)
         {
-            // create presentation system and simulation system
             var initializationSystemGroup = world.GetOrCreateSystem<InitializationSystemGroup>();
             var simulationSystemGroup = world.GetOrCreateSystem<SimulationSystemGroup>();
             var presentationSystemGroup = world.GetOrCreateSystem<PresentationSystemGroup>();
 
+            var systems = world.GetOrCreateSystemsAndLogException(systemTypes.ToArray());
+
             // Add systems to their groups, based on the [UpdateInGroup] attribute.
-            foreach (var type in systems)
+            foreach (var system in systems)
             {
+                if (system == null)
+                    continue;
+
                 // Skip the built-in root-level system groups
+                var type = system.GetType();
                 if (type == typeof(InitializationSystemGroup) ||
                     type == typeof(SimulationSystemGroup) ||
                     type == typeof(PresentationSystemGroup))
@@ -157,10 +141,10 @@ namespace Unity.Entities
                     continue;
                 }
 
-                var groups = type.GetCustomAttributes(typeof(UpdateInGroupAttribute), true);
+                var groups = TypeManager.GetSystemAttributes(system.GetType(), typeof(UpdateInGroupAttribute));
                 if (groups.Length == 0)
                 {
-                    simulationSystemGroup.AddSystemToUpdateList(GetOrCreateManagerAndLogException(world, type));
+                    simulationSystemGroup.AddSystemToUpdateList(system);
                 }
 
                 foreach (var g in groups)
@@ -169,39 +153,41 @@ namespace Unity.Entities
                     if (group == null)
                         continue;
 
-                    if (!(typeof(ComponentSystemGroup)).IsAssignableFrom(group.GroupType))
+                    if (!TypeManager.IsSystemAGroup(group.GroupType))
                     {
                         Debug.LogError($"Invalid [UpdateInGroup] attribute for {type}: {group.GroupType} must be derived from ComponentSystemGroup.");
                         continue;
                     }
 
-                    // Warn against unexpected behaviour combining DisableAutoCreation and UpdateInGroup
-                    var parentDisableAutoCreation = group.GroupType.GetCustomAttribute<DisableAutoCreationAttribute>() != null;
-                    if (parentDisableAutoCreation)
-                    {
-                        Debug.LogWarning($"A system {type} wants to execute in {group.GroupType} but this group has [DisableAutoCreation] and {type} does not.");
-                    }
-
-                    var groupMgr = GetOrCreateManagerAndLogException(world, group.GroupType);
+                    var groupMgr = world.GetExistingSystem(group.GroupType);
                     if (groupMgr == null)
                     {
-                        Debug.LogWarning(
-                            $"Skipping creation of {type} due to errors creating the group {group.GroupType}. Fix these errors before continuing.");
+                        // Warn against unexpected behaviour combining DisableAutoCreation and UpdateInGroup
+                        var parentDisableAutoCreation = TypeManager.GetSystemAttributes(group.GroupType, typeof(DisableAutoCreationAttribute)).Length > 0;
+                        if (parentDisableAutoCreation)
+                        {
+                            Debug.LogWarning($"A system {type} wants to execute in {group.GroupType} but this group has [DisableAutoCreation] and {type} does not. The system will not be added to any group and thus not update.");
+                        }
+                        else
+                        {
+                            Debug.LogWarning(
+                                $"A system {type} could not be added to group {group.GroupType}, because the group was not created. Fix these errors before continuing. The system will not be added to any group and thus not update.");
+                        }
                         continue;
                     }
 
                     var groupSys = groupMgr as ComponentSystemGroup;
                     if (groupSys != null)
                     {
-                        groupSys.AddSystemToUpdateList(GetOrCreateManagerAndLogException(world, type));
+                        groupSys.AddSystemToUpdateList(system);
                     }
                 }
             }
 
             // Update player loop
-            initializationSystemGroup.SortSystemUpdateList();
-            simulationSystemGroup.SortSystemUpdateList();
-            presentationSystemGroup.SortSystemUpdateList();
+            initializationSystemGroup.SortSystems();
+            simulationSystemGroup.SortSystems();
+            presentationSystemGroup.SortSystems();
         }
 
         /// <summary>
@@ -214,16 +200,16 @@ namespace Unity.Entities
             {
                 // * OnDisable (Serialize monobehaviours in temporary backup)
                 // * unload domain
-                // * load new domain	
-                // * OnEnable (Deserialize monobehaviours in temporary backup)	
-                // * mark entered playmode / load scene	
-                // * OnDisable / OnDestroy	
-                // * OnEnable (Loading object from scene...)	
+                // * load new domain
+                // * OnEnable (Deserialize monobehaviours in temporary backup)
+                // * mark entered playmode / load scene
+                // * OnDisable / OnDestroy
+                // * OnEnable (Loading object from scene...)
                 if (UnityEditor.EditorApplication.isPlayingOrWillChangePlaymode)
                 {
-                    // We are just gonna ignore this enter playmode reload.	
-                    // Can't see a situation where it would be useful to create something inbetween.	
-                    // But we really need to solve this at the root. The execution order is kind if crazy.	
+                    // We are just gonna ignore this enter playmode reload.
+                    // Can't see a situation where it would be useful to create something inbetween.
+                    // But we really need to solve this at the root. The execution order is kind if crazy.
                     if (UnityEditor.EditorApplication.isPlaying)
                         Debug.LogError("Loading GameObjectEntity in Playmode but there is no active World");
                 }
@@ -263,11 +249,20 @@ namespace Unity.Entities
                 return systemTypes;
 
             var filteredSystemTypes = new List<Type>();
-            var allSystemTypes = GetTypesDerivedFrom(typeof(ComponentSystemBase));
-            foreach (var systemType in allSystemTypes)
+
+            foreach (var systemType in GetTypesDerivedFrom(typeof(ComponentSystemBase)))
             {
                 if (FilterSystemType(systemType, filterFlags, requireExecuteAlways))
                     filteredSystemTypes.Add(systemType);
+            }
+
+            foreach (var unmanagedSystemType in GetTypesDerivedFrom(typeof(ISystemBase)))
+            {
+                if (!unmanagedSystemType.IsValueType)
+                    continue;
+
+                if (FilterSystemType(unmanagedSystemType, filterFlags, requireExecuteAlways))
+                    filteredSystemTypes.Add(unmanagedSystemType);
             }
 
             s_SystemTypeCache[lookupParameters] = filteredSystemTypes;
@@ -291,8 +286,8 @@ namespace Unity.Entities
                 return false;
             }
 
-            // only derivatives of ComponentSystemBase are systems
-            if (!type.IsSubclassOf(typeof(ComponentSystemBase)))
+            // only derivatives of ComponentSystemBase and structs implementing ISystemBase are systems
+            if (!type.IsSubclassOf(typeof(ComponentSystemBase)) && !typeof(ISystemBase).IsAssignableFrom(type))
                 throw new System.ArgumentException($"{type} must already be filtered by ComponentSystemBase");
 
             if (requireExecuteAlways)
@@ -304,7 +299,7 @@ namespace Unity.Entities
             }
 
             // the auto-creation system instantiates using the default ctor, so if we can't find one, exclude from list
-            if (type.GetConstructor(System.Type.EmptyTypes) == null)
+            if (type.IsClass && type.GetConstructor(System.Type.EmptyTypes) == null)
             {
                 // we want users to be explicit
                 if (!disableTypeAutoCreation && !disableAllAutoCreation)
@@ -327,7 +322,7 @@ namespace Unity.Entities
 
             return (filterFlags & systemFlags) != 0;
         }
-        
+
         static IEnumerable<System.Type> GetTypesDerivedFrom(Type type)
         {
             #if UNITY_EDITOR

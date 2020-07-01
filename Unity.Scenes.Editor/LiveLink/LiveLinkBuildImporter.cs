@@ -1,10 +1,9 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using Unity.Collections;
 using Unity.Entities;
-using Unity.Entities.Serialization;
 using UnityEditor;
 using UnityEditor.Experimental;
 using UnityEditor.Experimental.AssetImporters;
@@ -50,13 +49,13 @@ namespace Unity.Scenes.Editor
         }
     }
 
-    [ScriptedImporter(10, "liveLinkBundles")]
+    [ScriptedImporter(12, "liveLinkBundles")]
     public class LiveLinkBuildImporter : ScriptedImporter
     {
         const int k_CurrentFileFormatVersion = 1;
         const string k_DependenciesExtension = "dependencies";
-        const string k_BundleExtension = "bundle";
-        const string k_ManifestExtension = "manifest";
+        public const string k_BundleExtension = "bundle";
+        public const string k_ManifestExtension = "manifest";
 
         const string k_PrefabExtension = ".prefab";
         const string k_SceneExtension = ".unity";
@@ -67,22 +66,49 @@ namespace Unity.Scenes.Editor
             public BlobArray<Hash128> Dependencies;
         }
 
-        public static Hash128 GetHash(string guid, BuildTarget target)
+        [Obsolete("LiveLinkBuildImporter.GetHash has been deprecated. It will not be supported in the future. (RemovedAfter 2020-06-13).")]
+        public static Hash128 GetHash(string guid, BuildTarget target, AssetDatabaseExperimental.ImportSyncMode syncMode)
+        {
+            ImportMode importMode;
+            switch (syncMode)
+            {
+                case AssetDatabaseExperimental.ImportSyncMode.Block:
+                    importMode = ImportMode.Synchronous;
+                    break;
+                case AssetDatabaseExperimental.ImportSyncMode.Poll:
+                    importMode = ImportMode.NoImport;
+                    break;
+                case AssetDatabaseExperimental.ImportSyncMode.Queue:
+                    importMode = ImportMode.Asynchronous;
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(syncMode), $"Invalid enum value encountered: {syncMode}");
+            }
+
+            return GetHash(guid, target, importMode);
+        }
+
+        internal static Hash128 GetHash(string guid, BuildTarget target, ImportMode importMode)
         {
             LiveLinkBuildPipeline.RemapBuildInAssetGuid(ref guid);
             AssetBundleTypeCache.RegisterMonoScripts();
 
             // TODO: GetArtifactHash needs to take BuildTarget so we can get Artifacts for other than the ActiveBuildTarget
-            return AssetDatabaseExperimental.GetArtifactHash(guid, typeof(LiveLinkBuildImporter), AssetDatabaseExperimental.ImportSyncMode.Block);
+            return AssetDatabaseCompatibility.GetArtifactHash(guid, typeof(LiveLinkBuildImporter), importMode);
         }
 
+        [Obsolete("LiveLinkBuildImport.GetDependencies has been deprecated. It will not be supported in the future. (RemovedAfter 2020-06-13).")]
+        public static Hash128[] GetDependencies(Hash128 artifactHash) => GetDependenciesInternal(artifactHash);
+
         // Recursive until new SBP APIs land in 2020.1
-        public unsafe static Hash128[] GetDependencies(string guid, BuildTarget target)
+        internal static Hash128[] GetDependenciesInternal(Hash128 artifactHash)
         {
             try
             {
-                AssetDatabaseExperimental.GetArtifactPaths(GetHash(guid, target), out string[] paths);
+                AssetDatabaseCompatibility.GetArtifactPaths(artifactHash, out string[] paths);
                 var metaPath = paths.First(o => o.EndsWith(k_DependenciesExtension));
+                if (metaPath == null)
+                    return Array.Empty<Hash128>();
 
                 BlobAssetReference<BuildMetaData> buildMetaData;
                 if (!BlobAssetReference<BuildMetaData>.TryRead(metaPath, k_CurrentFileFormatVersion, out buildMetaData))
@@ -94,16 +120,19 @@ namespace Unity.Scenes.Editor
             }
             catch (Exception e)
             {
-                UnityEngine.Debug.LogError($"Exception thrown getting dependencies for '{guid}'.\n{e.Message}");
+                UnityEngine.Debug.LogError($"Exception thrown getting dependencies for '{artifactHash}'.\n{e.Message}");
             }
             return new Hash128[0];
         }
 
-        public static string GetBundlePath(string guid, BuildTarget target)
+        [Obsolete("LiveLinkBuildImport.GetBundlePath has been deprecated. It will not be supported in the future. (RemovedAfter 2020-06-13).")]
+        public static string GetBundlePath(Hash128 artifactHash, GUID guid) => GetBundlePathInternal(artifactHash, guid);
+
+        internal static string GetBundlePathInternal(Hash128 artifactHash, GUID guid)
         {
             try
             {
-                AssetDatabaseExperimental.GetArtifactPaths(GetHash(guid, target), out string[] paths);
+                AssetDatabaseCompatibility.GetArtifactPaths(artifactHash, out string[] paths);
                 return paths.First(o => o.EndsWith(k_BundleExtension));
             }
             catch (Exception e)
@@ -115,6 +144,7 @@ namespace Unity.Scenes.Editor
 
         public override void OnImportAsset(AssetImportContext ctx)
         {
+            ctx.DependsOnCustomDependency(EditorUserBuildSettings.activeBuildTarget.ToString());
             if (ctx.assetPath.ToLower().EndsWith(k_SceneExtension))
                 ImportSceneBundle(ctx);
             else
@@ -148,8 +178,12 @@ namespace Unity.Scenes.Editor
             {
                 var dependencyGuid = new GUID(dependency.ToString());
                 // Built in asset bundles can be ignored
-                if (dependencyGuid == LiveLinkBuildPipeline.k_UnityEditorResources || dependencyGuid == LiveLinkBuildPipeline.k_UnityBuiltinResources || dependencyGuid == LiveLinkBuildPipeline.k_UnityBuiltinExtraResources)
+                if (GUIDHelper.IsBuiltinAsset(in dependencyGuid))
                     continue;
+
+                if (LiveLinkBuildPipeline.TryRemapBuiltinExtraGuid(ref dependencyGuid, out _))
+                    continue;
+
                 var path = AssetDatabase.GUIDToAssetPath(dependencyGuid.ToString());
                 ctx.DependsOnSourceAsset(path);
             }
@@ -161,7 +195,7 @@ namespace Unity.Scenes.Editor
         private void ImportAssetBundle(AssetImportContext ctx)
         {
             var assetPath = ctx.assetPath;
-            LiveLinkBuildPipeline.RemapBuildInAssetPath(ref assetPath);
+            var fileIdent = LiveLinkBuildPipeline.RemapBuildInAssetPath(ref assetPath);
             var guid = new GUID(AssetDatabase.AssetPathToGUID(assetPath));
 
             var manifest = UnityEngine.ScriptableObject.CreateInstance<AssetObjectManifest>();
@@ -172,7 +206,7 @@ namespace Unity.Scenes.Editor
             var bundlePath = ctx.GetResultPath(k_BundleExtension);
             var dependencies = new HashSet<Hash128>();
             var types = new HashSet<Type>();
-            LiveLinkBuildPipeline.BuildAssetBundle(manifestPath, guid, bundlePath, ctx.selectedBuildTarget, false, dependencies, types);
+            LiveLinkBuildPipeline.BuildAssetBundle(manifestPath, guid, bundlePath, ctx.selectedBuildTarget, false, dependencies, types, fileIdent);
 
             var dependenciesPath = ctx.GetResultPath(k_DependenciesExtension);
             WriteDependenciesResult(dependenciesPath, dependencies.ToArray());

@@ -22,8 +22,8 @@ namespace Doc.CodeSamples.Tests
 
     #region declare-element-full
 
-// InternalBufferCapacity specifies how many elements a buffer can have before
-// the buffer storage is moved outside the chunk.
+    // InternalBufferCapacity specifies how many elements a buffer can have before
+    // the buffer storage is moved outside the chunk.
     [InternalBufferCapacity(8)]
     public struct MyBufferElement : IBufferElementData
     {
@@ -38,7 +38,7 @@ namespace Doc.CodeSamples.Tests
 
         public static implicit operator MyBufferElement(int e)
         {
-            return new MyBufferElement {Value = e};
+            return new MyBufferElement { Value = e };
         }
     }
 
@@ -50,7 +50,7 @@ namespace Doc.CodeSamples.Tests
         public int ElementCount;
     }
 
-    public class AddBufferSnippets : JobComponentSystem
+    public class AddBufferSnippets : SystemBase
     {
         protected override void OnCreate()
         {
@@ -90,10 +90,27 @@ namespace Doc.CodeSamples.Tests
             buffer.RemoveAt(0);
 
             #endregion
+
+            #region invalidation
+
+            var entity1 = EntityManager.CreateEntity();
+            var entity2 = EntityManager.CreateEntity();
+
+            DynamicBuffer<MyBufferElement> buffer1
+                = EntityManager.AddBuffer<MyBufferElement>(entity1);
+            // This line causes a structural change and invalidates
+            // the previously acquired dynamic buffer
+            DynamicBuffer<MyBufferElement> buffer2
+                = EntityManager.AddBuffer<MyBufferElement>(entity1);
+            // This line will cause an error:
+            buffer1.Add(17);
+
+            #endregion
         }
 
         #region add-in-job
 
+#pragma warning disable 618
         struct DataSpawnJob : IJobForEachWithEntity<DataToSpawn>
         {
             // A command buffer marshals structural changes to the data
@@ -125,10 +142,11 @@ namespace Doc.CodeSamples.Tests
                 CommandBuffer.DestroyEntity(index, spawnEntity);
             }
         }
+#pragma warning restore 618
 
         #endregion
 
-        protected override JobHandle OnUpdate(JobHandle inputDeps)
+        protected override void OnUpdate()
         {
             throw new System.NotImplementedException();
         }
@@ -136,7 +154,7 @@ namespace Doc.CodeSamples.Tests
 
     #region access-buffer-system
 
-    public class DynamicBufferSystem : ComponentSystem
+    public class DynamicBufferSystem : SystemBase
     {
         protected override void OnUpdate()
         {
@@ -148,7 +166,7 @@ namespace Doc.CodeSamples.Tests
                 {
                     sum += integer;
                 }
-            });
+            }).Run();
 
             Debug.Log("Sum of all buffers: " + sum);
         }
@@ -156,52 +174,11 @@ namespace Doc.CodeSamples.Tests
 
     #endregion
 
-    #region declare-ijfe-with-buffer
-
-    public struct BuffersByEntity : IJobForEachWithEntity_EB<MyBufferElement>
-
-        #endregion
-
-    {
-        #region declare-ijfe-execute-method
-
-        public void Execute(Entity entity, int index, DynamicBuffer<MyBufferElement> buffer)
-
-            #endregion
-
-        {
-            //...
-        }
-    }
-
     #region access-ijfe
 
-    public class DynamicBufferForEachSystem : JobComponentSystem
+    public class DynamicBufferForEachSystem : SystemBase
     {
         private EntityQuery query;
-
-        protected override void OnCreate()
-        {
-            EntityQueryDesc queryDescription = new EntityQueryDesc();
-            queryDescription.All = new[] {ComponentType.ReadOnly<MyBufferElement>()};
-            query = GetEntityQuery(queryDescription);
-        }
-
-        //Sums the elements of individual buffers of each entity
-        public struct BuffersByEntity : IJobForEachWithEntity_EB<MyBufferElement>
-        {
-            public NativeArray<int> sums;
-
-            public void Execute(Entity entity,
-                int index,
-                DynamicBuffer<MyBufferElement> buffer)
-            {
-                foreach (int integer in buffer.Reinterpret<int>())
-                {
-                    sums[index] += integer;
-                }
-            }
-        }
 
         //Sums the intermediate results into the final total
         public struct SumResult : IJob
@@ -222,7 +199,7 @@ namespace Doc.CodeSamples.Tests
         }
 
         //Schedules the two jobs with a dependency between them
-        protected override JobHandle OnUpdate(JobHandle inputDeps)
+        protected override void OnUpdate()
         {
             //Create a native array to hold the intermediate sums
             int entitiesInQuery = query.CalculateEntityCount();
@@ -230,14 +207,37 @@ namespace Doc.CodeSamples.Tests
                 = new NativeArray<int>(entitiesInQuery, Allocator.TempJob);
 
             //Schedule the first job to add all the buffer elements
-            BuffersByEntity bufferJob = new BuffersByEntity();
-            bufferJob.sums = intermediateSums;
-            JobHandle intermediateJob = bufferJob.Schedule(this, inputDeps);
+            Entities
+                .WithStoreEntityQueryInField(ref query)
+                .ForEach((int entityInQueryIndex, Entity entity, in DynamicBuffer<MyBufferElement> buffer) => {
+                    foreach (int integer in buffer.Reinterpret<int>())
+                    {
+                        intermediateSums[entityInQueryIndex] += integer;
+                    }
+                })
+                .ScheduleParallel();
+
+            // Must use a NativeArray to get data out of a Job.WithCode when scheduled to run on a background thread
+            NativeArray<int> sum = new NativeArray<int>(1, Allocator.TempJob);
 
             //Schedule the second job, which depends on the first
-            SumResult finalSumJob = new SumResult();
-            finalSumJob.sums = intermediateSums;
-            return finalSumJob.Schedule(intermediateJob);
+            Job
+                .WithDeallocateOnJobCompletion(intermediateSums)
+                .WithCode(() =>
+                {
+                    foreach (int integer in intermediateSums)
+                    {
+                        sum[0] += integer;
+                    }
+                    //if we do not specify dependencies, the job depends on the Dependency property
+                }).Schedule();
+            // Likewise, if we don't return a JobHandle, the system adds the job to its Dependency property
+
+            //sum[0] will contain the result after all the jobs have finished
+            this.CompleteDependency(); // Wait for the results now
+
+            Debug.Log(sum[0]);
+            sum.Dispose();
         }
     }
 
@@ -245,7 +245,7 @@ namespace Doc.CodeSamples.Tests
 
     #region access-chunk-job
 
-    public class DynamicBufferJobSystem : JobComponentSystem
+    public class DynamicBufferJobSystem : SystemBase
     {
         private EntityQuery query;
 
@@ -290,21 +290,17 @@ namespace Doc.CodeSamples.Tests
         public struct SumResult : IJob
         {
             [DeallocateOnJobCompletion] public NativeArray<int> sums;
-
+            public NativeArray<int> result;
             public void Execute()
             {
-                int sum = 0;
                 foreach (int integer in sums)
                 {
-                    sum += integer;
+                    result[0] += integer;
                 }
-
-                //Note: Debug.Log is not burst-compatible
-                Debug.Log("Sum of all buffers: " + sum);
             }
         }
 
-        protected override JobHandle OnUpdate(JobHandle inputDeps)
+        protected override void OnUpdate()
         {
             //Create a native array to hold the intermediate sums
             int chunksInQuery = query.CalculateChunkCount();
@@ -315,12 +311,18 @@ namespace Doc.CodeSamples.Tests
             BuffersInChunks bufferJob = new BuffersInChunks();
             bufferJob.BufferType = GetArchetypeChunkBufferType<MyBufferElement>();
             bufferJob.sums = intermediateSums;
-            JobHandle intermediateJob = bufferJob.Schedule(query, inputDeps);
+            this.Dependency = bufferJob.ScheduleParallel(query, this.Dependency);
 
             //Schedule the second job, which depends on the first
             SumResult finalSumJob = new SumResult();
             finalSumJob.sums = intermediateSums;
-            return finalSumJob.Schedule(intermediateJob);
+            NativeArray<int> finalSum = new NativeArray<int>(1, Allocator.Temp);
+            finalSumJob.result = finalSum;
+            this.Dependency = finalSumJob.Schedule(this.Dependency);
+
+            this.CompleteDependency();
+            Debug.Log("Sum of all buffers: " + finalSum[0]);
+            finalSum.Dispose();
         }
     }
 
@@ -418,6 +420,13 @@ namespace Doc.CodeSamples.Tests
 
             #endregion
 
+            #region dynamicbuffer.copyfrom.nativeslice
+
+            NativeSlice<int> nativeSlice = new NativeSlice<int>(nativeArray, 1, 3);
+            buffer.CopyFrom(nativeSlice);
+
+            #endregion
+
             #region dynamicbuffer.copyfrom.array
 
             int[] integerArray = {1, 2, 3, 4, 5};
@@ -511,7 +520,7 @@ namespace Doc.CodeSamples.Tests
         }
     }
 
-    public class ReinterpretExample : ComponentSystem
+    public class ReinterpretExample : SystemBase
     {
         protected override void OnUpdate()
         {
@@ -524,7 +533,7 @@ namespace Doc.CodeSamples.Tests
                 {
                     floatBuffer[i] = i * 1.2f;
                 }
-            });
+            }).ScheduleParallel();
 
             #endregion
         }

@@ -8,7 +8,6 @@ namespace Unity.Entities.Editor.Tests
 {
     class EntityDebuggerTests : ECSTestsFixture
     {
-
         private EntityDebugger m_Window;
         private ComponentSystem m_System;
         private EntityQuery entityQuery;
@@ -54,7 +53,7 @@ namespace Unity.Entities.Editor.Tests
             World2 = new World(World2Name);
             var emptySys = World2.GetOrCreateSystem<EmptySystem>();
             World.GetOrCreateSystem<SimulationSystemGroup>().AddSystemToUpdateList(emptySys);
-            World.GetOrCreateSystem<SimulationSystemGroup>().SortSystemUpdateList();
+            World.GetOrCreateSystem<SimulationSystemGroup>().SortSystems();
 
             entityQuery = m_System.EntityQueries[0];
 
@@ -80,9 +79,9 @@ namespace Unity.Entities.Editor.Tests
         public void WorldPopup_RestorePreviousSelection()
         {
             World world = null;
-            var popup = new WorldPopup(() => null, x => world = x, () => true, () => {});
+            var popup = new WorldPopup(() => null, x => world = x, () => true, () => {}, () => true, v => {});
             popup.TryRestorePreviousSelection(false, WorldPopup.kNoWorldName);
-            Assert.AreEqual(World.AllWorlds[0], world);
+            Assert.AreEqual(World.All[0], world);
             popup.TryRestorePreviousSelection(false, World2Name);
             Assert.AreEqual(World2, world);
         }
@@ -187,6 +186,5 @@ namespace Unity.Entities.Editor.Tests
             Assert.IsNotNull(EntityDebuggerStyles.ComponentReadOnly.normal.background);
             Assert.IsNotNull(EntityDebuggerStyles.ComponentReadWrite.normal.background);
         }
-
     }
 }

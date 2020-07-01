@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using Unity.Entities;
 using Unity.Entities.Tests;
+using Unity.Assertions;
 
 [assembly: RegisterGenericComponentType(typeof(EcsTestGeneric<int>))]
 [assembly: RegisterGenericComponentType(typeof(EcsTestGeneric<float>))]
@@ -94,13 +96,13 @@ namespace Unity.Entities.Tests
     {
         public float Value;
     }
-    
+
     public struct EcsTestFloatData2 : IComponentData
     {
         public float Value0;
         public float Value1;
     }
-    
+
     public struct EcsTestFloatData3 : IComponentData
     {
         public float Value0;
@@ -152,6 +154,30 @@ namespace Unity.Entities.Tests
         }
     }
 
+    public unsafe struct EcsTestSharedCompWithRefCount : ISharedComponentData, IRefCounted
+    {
+        readonly int* RefCount;
+
+        public EcsTestSharedCompWithRefCount(int* refCount)
+        {
+            Assert.IsTrue(refCount != null);
+            this.RefCount = refCount;
+        }
+
+        public void Retain()
+        {
+            Assert.IsTrue(RefCount != null);
+            Interlocked.Increment(ref *RefCount);
+        }
+
+        public void Release()
+        {
+            Assert.IsTrue(RefCount != null);
+            Interlocked.Decrement(ref *RefCount);
+        }
+    }
+
+
     public struct EcsTestDataEntity : IComponentData
     {
         public int value0;
@@ -194,10 +220,9 @@ namespace Unity.Entities.Tests
         {
             value = inValue;
         }
-
     }
 
-    struct EcsState1 : ISystemStateComponentData
+    public struct EcsState1 : ISystemStateComponentData
     {
         public int Value;
 
@@ -207,7 +232,7 @@ namespace Unity.Entities.Tests
         }
     }
 
-    struct EcsStateTag1 : ISystemStateComponentData
+    public struct EcsStateTag1 : ISystemStateComponentData
     {
     }
 
@@ -333,24 +358,29 @@ namespace Unity.Entities.Tests
     {
         public ClassWithString ClassWithString;
     }
-    
+
     public class EcsTestManagedDataEntity : IComponentData
     {
         public string value0;
         public Entity value1;
+        public int value2;
         public ClassWithClassFields nullField;
 
         public EcsTestManagedDataEntity()
         {
         }
 
-        public EcsTestManagedDataEntity(string inValue0, Entity inValue1)
+        public EcsTestManagedDataEntity(string inValue0, Entity inValue1, int inValue2 = 0)
         {
             value0 = inValue0;
             value1 = inValue1;
+            value2 = inValue2;
             nullField = null;
         }
     }
+
+#if !UNITY_DOTSPLAYER_IL2CPP
+// https://unity3d.atlassian.net/browse/DOTSR-1432
 
     public class EcsTestManagedDataEntityCollection : IComponentData
     {
@@ -369,6 +399,7 @@ namespace Unity.Entities.Tests
             nullField = null;
         }
     }
+#endif
 
     public class EcsTestManagedComponent : IComponentData
     {
@@ -400,5 +431,35 @@ namespace Unity.Entities.Tests
     {
         public string value4;
     }
+
+    public unsafe class EcsTestManagedCompWithRefCount : IComponentData, ICloneable, IDisposable
+    {
+        readonly int* RefCount;
+
+        public EcsTestManagedCompWithRefCount()
+        {
+            RefCount = null;
+        }
+
+        public EcsTestManagedCompWithRefCount(int* refCount)
+        {
+            Assert.IsTrue(refCount != null);
+            this.RefCount = refCount;
+        }
+
+        public object Clone()
+        {
+            Assert.IsTrue(RefCount != null);
+            Interlocked.Increment(ref *RefCount);
+            return this;
+        }
+
+        public void Dispose()
+        {
+            Assert.IsTrue(RefCount != null);
+            Interlocked.Decrement(ref *RefCount);
+        }
+    }
+
 #endif
 }

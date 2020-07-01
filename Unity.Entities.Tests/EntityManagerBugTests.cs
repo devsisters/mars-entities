@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using Unity.Collections;
 using NUnit.Framework;
 using System.Collections.Generic;
@@ -132,6 +132,51 @@ namespace Unity.Entities.Tests
         }
     }
 
+    class Bug1294 : ECSTestsFixture
+    {
+        [Test]
+        public unsafe void EntityInChunkCompareTo_Low32BitsMatch_ComparesCorrectly()
+        {
+            // Create a valid Entity and get its EntityInChunk:
+            var ent1 = m_Manager.CreateEntity(typeof(EcsTestData));
+            var eic1 = m_Manager.GetCheckedEntityDataAccess()->EntityComponentStore->GetEntityInChunk(ent1);
+            // Construct an artificial EntityInChunk for a hypothetical entity in a hypothetical
+            // Chunk, exactly 2^32 bytes higher than ent1's (such that comparing only 32 bits of
+            // the chunk pointer would fail):
+            var eic2 = new EntityInChunk
+            {
+                Chunk = (Chunk*)((ulong)eic1.Chunk + (1ul << 32)),
+                IndexInChunk = eic1.IndexInChunk,
+            };
+            Assert.Greater((ulong)eic2.Chunk, (ulong)eic1.Chunk);
+            Assert.AreEqual((int)eic2.Chunk, (int)eic1.Chunk);
+            // Make sure the EntityInChunks sort correctly (eic2 > eic1):
+            Assert.Greater(eic2.CompareTo(eic1), 0);
+            Assert.Less(eic1.CompareTo(eic2), 0);
+        }
+
+        [Test]
+        public unsafe void EntityInChunkCompareTo_DifferenceOverflows32Bits_ComparesCorrectly()
+        {
+            // Create a valid Entity and get its EntityInChunk:
+            var ent1 = m_Manager.CreateEntity(typeof(EcsTestData));
+            var eic1 = m_Manager.GetCheckedEntityDataAccess()->EntityComponentStore->GetEntityInChunk(ent1);
+            // Construct an artificial EntityInChunk for a hypothetical entity in a hypothetical
+            // Chunk, whose pointer is just above 2^31 larger than ent1's (such that using lhs-rhs as the
+            // CompareTo result would overflow a signed int and give an incorrect result):
+            var eic2 = new EntityInChunk
+            {
+                Chunk = (Chunk*)((ulong)eic1.Chunk + (1ul << 31) + 65536),
+                IndexInChunk = eic1.IndexInChunk,
+            };
+            Assert.Greater((ulong)eic2.Chunk, (ulong)eic1.Chunk);
+            Assert.Less((int)((ulong)eic2.Chunk - (ulong)eic1.Chunk), 0);
+            // Make sure the EntityInChunks sort correctly (eic2 > eic1):
+            Assert.Greater(eic2.CompareTo(eic1), 0);
+            Assert.Less(eic1.CompareTo(eic2), 0);
+        }
+    }
+
     class Bug476 : ECSTestsFixture
     {
         [Test]
@@ -150,11 +195,7 @@ namespace Unity.Entities.Tests
         [Test]
         public void Test1()
         {
-#if !UNITY_DOTSPLAYER
             World w = new World("TestWorld");
-#else
-            World w = DefaultTinyWorldInitialization.Initialize("TestWorld");
-#endif
             World.DefaultGameObjectInjectionWorld = w;
             EntityManager em = World.DefaultGameObjectInjectionWorld.EntityManager;
             List<Entity> remember = new List<Entity>();
@@ -181,11 +222,7 @@ namespace Unity.Entities.Tests
         [Test]
         public void Test2()
         {
-#if !UNITY_DOTSPLAYER
             World w = new World("TestWorld");
-#else
-            World w = DefaultTinyWorldInitialization.Initialize("TestWorld");
-#endif
             World.DefaultGameObjectInjectionWorld = w;
             EntityManager em = World.DefaultGameObjectInjectionWorld.EntityManager;
 
@@ -198,11 +235,7 @@ namespace Unity.Entities.Tests
             w.Dispose();
             w = null;
 
-#if !UNITY_DOTSPLAYER
             w = new World("TestWorld2");
-#else
-            w = DefaultTinyWorldInitialization.Initialize("TestWorld");
-#endif
             World.DefaultGameObjectInjectionWorld = w;
             em = World.DefaultGameObjectInjectionWorld.EntityManager;
             var allEnt = em.GetAllEntities(Allocator.Temp);

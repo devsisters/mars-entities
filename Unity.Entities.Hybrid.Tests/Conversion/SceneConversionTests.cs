@@ -1,7 +1,8 @@
+using System.Linq;
 using NUnit.Framework;
-using Unity.Build;
 using Unity.Entities.Conversion;
 using Unity.Mathematics;
+using Unity.Build;
 using Unity.Transforms;
 using UnityEditor.SceneManagement;
 using UnityEngine;
@@ -27,6 +28,7 @@ namespace Unity.Entities.Tests.Conversion
         }
 
         [Test]
+        [DotsRuntimeIncompatibleTest("TinySamples asmdefs will pollute this test's exact match criteria")]
         public void ConvertGameObject_HasOnlyTransform_ProducesEntityWithPositionAndRotation()
         {
             var scene = SceneManager.GetActiveScene();
@@ -69,7 +71,11 @@ namespace Unity.Entities.Tests.Conversion
             parent.DeclareLinkedEntityGroup = true;
             parent.Value = parent.gameObject;
 
-            using (var conversionWorld = GameObjectConversionUtility.ConvertIncrementalInitialize(SceneManager.GetActiveScene(), new GameObjectConversionSettings(World, conversionFlags)))
+            var settings = new GameObjectConversionSettings(World, conversionFlags)
+            {
+                Systems = TestWorldSetup.GetDefaultInitSystemsFromEntitiesPackage(WorldSystemFilterFlags.GameObjectConversion).ToList()
+            };
+            using (var conversionWorld = GameObjectConversionUtility.ConvertIncrementalInitialize(SceneManager.GetActiveScene(), settings))
             {
                 Entities.ForEach((ref EntityRefTestData data) =>
                     StringAssert.StartsWith("parent", m_Manager.GetName(data.Value)));
@@ -115,7 +121,7 @@ namespace Unity.Entities.Tests.Conversion
             var go = CreateGameObject("Test Conversion");
             go.transform.localPosition = new Vector3(1, 2, 3);
 
-            var buildSettings = BuildSettings.CreateInstance((bs) =>
+            var config = BuildConfiguration.CreateInstance((bs) =>
             {
                 bs.hideFlags = HideFlags.HideAndDontSave;
                 bs.SetComponent(new ConversionSystemFilterSettings("Unity.Transforms.Hybrid"));
@@ -124,7 +130,8 @@ namespace Unity.Entities.Tests.Conversion
             var conversionSettings = new GameObjectConversionSettings
             {
                 DestinationWorld = World,
-                BuildSettings = buildSettings
+                BuildConfiguration = config,
+                Systems = TestWorldSetup.GetDefaultInitSystemsFromEntitiesPackage(WorldSystemFilterFlags.GameObjectConversion).ToList()
             };
 
             GameObjectConversionUtility.ConvertScene(scene, conversionSettings);

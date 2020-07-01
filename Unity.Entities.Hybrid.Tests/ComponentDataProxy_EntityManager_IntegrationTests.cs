@@ -9,6 +9,7 @@ using UnityEngine;
 
 namespace Unity.Entities.Tests
 {
+#pragma warning disable 618 // remove once ComponentDataProxyBase is removed
     class ComponentDataProxy_EntityManager_IntegrationTests
     {
         GameObjectEntity m_GameObjectEntity;
@@ -98,9 +99,6 @@ namespace Unity.Entities.Tests
             Assert.That(actual, Is.EqualTo(expectedValue), $"Value was reset after deserializing {proxyType}");
         }
 
-        static readonly FieldInfo k_EntityManagerBackingField =
-            typeof(GameObjectEntity).GetField("m_EntityManager", BindingFlags.Instance | BindingFlags.NonPublic);
-
         static readonly TestCaseData[] k_InvalidManagerSyncTestCases =
         {
             new TestCaseData(
@@ -119,22 +117,6 @@ namespace Unity.Entities.Tests
                 (MockSetter)SetMockDynamicBufferData, (MockGetter)GetMockDynamicBufferData
             ).SetName("Sync DynamicBufferProxy (InvalidManager)")
         };
-
-        [TestCaseSource(nameof(k_InvalidManagerSyncTestCases))]
-        public void ComponentDataProxy_WhenEntityManagerIsInvalid_SynchronizesWithEntityManager(
-            Type proxyType, object expectedValue, MockSetter setValue, MockGetter getValue
-        )
-        {
-            var entityManager = EntityManager.CreateEntityManagerInUninitializedState();
-            k_EntityManagerBackingField.SetValue(m_GameObjectEntity, entityManager);
-            Assume.That(entityManager.IsCreated, Is.False, "EntityManager was not in correct state in test arrangement");
-            var proxy = m_GameObjectEntity.gameObject.AddComponent(proxyType) as ComponentDataProxyBase;
-
-            setValue(proxy, expectedValue);
-
-            var actual = getValue(proxy);
-            Assert.That(actual, Is.EqualTo(expectedValue), $"Setting value on {proxyType} failed");
-        }
 
         [Test]
         public void AddComponentDataProxy_WhenGameObjectEntityAlreadyActive_EntityManagerHasComponent()
@@ -184,4 +166,5 @@ namespace Unity.Entities.Tests
             Assert.That(Manager.HasComponent(Entity, typeof(MockData)), Is.True, "No data after re-enabling proxy.");
         }
     }
+#pragma warning restore 618
 }

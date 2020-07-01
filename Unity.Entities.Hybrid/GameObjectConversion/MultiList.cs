@@ -94,7 +94,7 @@ namespace Unity.Entities.Conversion
         {
             var headId = HeadIds[headIdIndex];
 
-            for (int currentId = headId, serial = 1; ; ++serial)
+            for (int currentId = headId, serial = 1;; ++serial)
             {
                 var next = Next[currentId];
                 if (next < 0)
@@ -158,6 +158,10 @@ namespace Unity.Entities.Conversion
         [Pure]
         public MultiListEnumerator<T> SelectListAt(int headId) =>
             new MultiListEnumerator<T>(Data, Next, headId);
+
+        [Pure]
+        public MultiListEnumerator<T> SelectList(int headIdIndex) =>
+            new MultiListEnumerator<T>(Data, Next, HeadIds[headIdIndex]);
 
         public bool TrySelectList(int headIdIndex, out MultiListEnumerator<T> iter)
         {
