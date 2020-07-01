@@ -7,136 +7,84 @@ using Unity.Collections.LowLevel.Unsafe;
 
 namespace Unity.Entities
 {
-    [BurstCompile]
-    unsafe struct StructuralChange
+    [AttributeUsage(AttributeTargets.Method)]
+    internal class MonoPInvokeCallbackAttribute : Attribute
     {
-        public delegate void AddComponentEntitiesBatchDelegate(EntityComponentStore* entityComponentStore, UnsafeList* entityBatchList, int typeIndex);
-        public delegate bool AddComponentEntityDelegate(EntityComponentStore* entityComponentStore, Entity* entity, int typeIndex);
-        public delegate void AddComponentChunksDelegate(EntityComponentStore* entityComponentStore, ArchetypeChunk* chunks, int chunkCount, int typeIndex);
-        public delegate bool RemoveComponentEntityDelegate(EntityComponentStore* entityComponentStore, Entity* entity, int typeIndex);
-        public delegate void RemoveComponentEntitiesBatchDelegate(EntityComponentStore* entityComponentStore, UnsafeList* entityBatchList, int typeIndex);
-        public delegate void RemoveComponentChunksDelegate(EntityComponentStore* entityComponentStore, ArchetypeChunk* chunks, int chunkCount, int typeIndex);
-        public delegate void AddSharedComponentChunksDelegate(EntityComponentStore* entityComponentStore, ArchetypeChunk* chunks, int chunkCount, int componentTypeIndex, int sharedComponentIndex);
-        public delegate void SetChunkComponentDelegate(EntityComponentStore* entityComponentStore, ArchetypeChunk* chunks, int chunkCount, void* componentData, int componentTypeIndex );
-        public delegate void InstantiateEntitiesDelegate(EntityComponentStore* entityComponentStore, Entity* srcEntity, Entity* outputEntities, int instanceCount);
-        // These two delegates use void* instead of Archetype* to allow PInvoke to not complain about trying to take a pointer 
-        // to an Archetype which is not blittable (as far as DotNet cares) due to its boolean fields.
-        public delegate void MoveEntityArchetypeDelegate(EntityComponentStore* entityComponentStore, Entity* entity, void* dstArchetype);
-        public delegate void CreateEntityDelegate(EntityComponentStore* entityComponentStore, void* archetype, Entity* outEntities, int count);
+        internal MonoPInvokeCallbackAttribute(Type type) {}
+    }
 
-        public static AddComponentEntitiesBatchDelegate AddComponentEntitiesBatch;
-        public static AddComponentEntityDelegate AddComponentEntity;
-        public static AddComponentChunksDelegate AddComponentChunks;
-        public static RemoveComponentEntityDelegate RemoveComponentEntity;
-        public static RemoveComponentEntitiesBatchDelegate RemoveComponentEntitiesBatch;
-        public static RemoveComponentChunksDelegate RemoveComponentChunks;
-        public static AddSharedComponentChunksDelegate AddSharedComponentChunks;
-        public static MoveEntityArchetypeDelegate MoveEntityArchetype;
-        public static SetChunkComponentDelegate SetChunkComponent;
-        public static CreateEntityDelegate CreateEntity;
-        public static InstantiateEntitiesDelegate InstantiateEntities; 
-        
-        public static void Initialize()
-        {
-            if (AddComponentEntitiesBatch != null)
-                return;
-
-#if NET_DOTS
-            AddComponentEntitiesBatch = AddComponentEntitiesBatchExecute;
-            AddComponentEntity = AddComponentEntityExecute;
-            AddComponentChunks = AddComponentChunksExecute;
-            RemoveComponentEntity = RemoveComponentEntityExecute;
-            RemoveComponentEntitiesBatch = RemoveComponentEntitiesBatchExecute;
-            RemoveComponentChunks = RemoveComponentChunksExecute;
-            AddSharedComponentChunks = AddSharedComponentChunksExecute;
-            MoveEntityArchetype = MoveEntityArchetypeExecute;
-            SetChunkComponent = SetChunkComponentExecute;
-            CreateEntity = CreateEntityExecute;
-            InstantiateEntities = InstantiateEntitiesExecute;
-
-#else
-            AddComponentEntitiesBatch = BurstCompiler.CompileFunctionPointer<AddComponentEntitiesBatchDelegate>(AddComponentEntitiesBatchExecute).Invoke;
-            AddComponentEntity = BurstCompiler.CompileFunctionPointer<AddComponentEntityDelegate>(AddComponentEntityExecute).Invoke;
-            AddComponentChunks = BurstCompiler.CompileFunctionPointer<AddComponentChunksDelegate>(AddComponentChunksExecute).Invoke;
-            RemoveComponentEntity = BurstCompiler.CompileFunctionPointer<RemoveComponentEntityDelegate>(RemoveComponentEntityExecute).Invoke;
-            RemoveComponentEntitiesBatch = BurstCompiler.CompileFunctionPointer<RemoveComponentEntitiesBatchDelegate>(RemoveComponentEntitiesBatchExecute).Invoke;
-            RemoveComponentChunks = BurstCompiler.CompileFunctionPointer<RemoveComponentChunksDelegate>(RemoveComponentChunksExecute).Invoke;
-            AddSharedComponentChunks = BurstCompiler.CompileFunctionPointer<AddSharedComponentChunksDelegate>(AddSharedComponentChunksExecute).Invoke;
-            MoveEntityArchetype = BurstCompiler.CompileFunctionPointer<MoveEntityArchetypeDelegate>(MoveEntityArchetypeExecute).Invoke;
-            SetChunkComponent = BurstCompiler.CompileFunctionPointer<SetChunkComponentDelegate>(SetChunkComponentExecute).Invoke;
-            CreateEntity = BurstCompiler.CompileFunctionPointer<CreateEntityDelegate>(CreateEntityExecute).Invoke;
-            InstantiateEntities = BurstCompiler.CompileFunctionPointer<InstantiateEntitiesDelegate>(InstantiateEntitiesExecute).Invoke;
-#endif
-        }
-
-        [BurstCompile]
-        static void AddComponentEntitiesBatchExecute(EntityComponentStore* entityComponentStore, UnsafeList* entityBatchList, int typeIndex)
+    [BurstCompile]
+    [GenerateBurstMonoInterop("EntityManagerChangeArchetype")]
+    unsafe partial struct StructuralChange
+    {
+        [BurstMonoInteropMethod]
+        static void _AddComponentEntitiesBatch(EntityComponentStore* entityComponentStore, UnsafeList* entityBatchList, int typeIndex)
         {
             entityComponentStore->AddComponent(entityBatchList, ComponentType.FromTypeIndex(typeIndex), 0);
         }
 
-        [BurstCompile]
-        static bool AddComponentEntityExecute(EntityComponentStore* entityComponentStore, Entity* entity, int typeIndex)
+        [BurstMonoInteropMethod]
+        static bool _AddComponentEntity(EntityComponentStore* entityComponentStore, Entity* entity, int typeIndex)
         {
             return entityComponentStore->AddComponent(*entity, ComponentType.FromTypeIndex(typeIndex));
         }
 
-        [BurstCompile]
-        static void AddComponentChunksExecute(EntityComponentStore* entityComponentStore, ArchetypeChunk* chunks, int chunkCount, int typeIndex)
+        [BurstMonoInteropMethod]
+        static void _AddComponentChunks(EntityComponentStore* entityComponentStore, ArchetypeChunk* chunks, int chunkCount, int typeIndex)
         {
             entityComponentStore->AddComponent(chunks, chunkCount, ComponentType.FromTypeIndex(typeIndex));
         }
 
-        [BurstCompile]
-        static bool RemoveComponentEntityExecute(EntityComponentStore* entityComponentStore, Entity* entity, int typeIndex)
+        [BurstMonoInteropMethod]
+        static bool _RemoveComponentEntity(EntityComponentStore* entityComponentStore, Entity* entity, int typeIndex)
         {
             return entityComponentStore->RemoveComponent(*entity, ComponentType.FromTypeIndex(typeIndex));
         }
 
-        [BurstCompile]
-        static void RemoveComponentEntitiesBatchExecute(EntityComponentStore* entityComponentStore, UnsafeList* entityBatchList, int typeIndex)
+        [BurstMonoInteropMethod]
+        static void _RemoveComponentEntitiesBatch(EntityComponentStore* entityComponentStore, UnsafeList* entityBatchList, int typeIndex)
         {
             entityComponentStore->RemoveComponent(entityBatchList, ComponentType.FromTypeIndex(typeIndex));
         }
 
-        [BurstCompile]
-        static void RemoveComponentChunksExecute(EntityComponentStore* entityComponentStore, ArchetypeChunk* chunks, int chunkCount, int typeIndex)
+        [BurstMonoInteropMethod]
+        static void _RemoveComponentChunks(EntityComponentStore* entityComponentStore, ArchetypeChunk* chunks, int chunkCount, int typeIndex)
         {
             entityComponentStore->RemoveComponent(chunks, chunkCount, ComponentType.FromTypeIndex(typeIndex));
         }
 
-        [BurstCompile]
-        static void AddSharedComponentChunksExecute(EntityComponentStore* entityComponentStore, ArchetypeChunk* chunks, int chunkCount, int componentTypeIndex, int sharedComponentIndex)
+        [BurstMonoInteropMethod]
+        static void _AddSharedComponentChunks(EntityComponentStore* entityComponentStore, ArchetypeChunk* chunks, int chunkCount, int componentTypeIndex, int sharedComponentIndex)
         {
             entityComponentStore->AddComponent(chunks, chunkCount, ComponentType.FromTypeIndex(componentTypeIndex), sharedComponentIndex);
         }
 
-        [BurstCompile]
-        static void MoveEntityArchetypeExecute(EntityComponentStore* entityComponentStore, Entity* entity, void* dstArchetype)
+        [BurstMonoInteropMethod]
+        static void _MoveEntityArchetype(EntityComponentStore* entityComponentStore, Entity* entity, void* dstArchetype)
         {
-            entityComponentStore->Move(*entity, (Archetype*) dstArchetype);
+            entityComponentStore->Move(*entity, (Archetype*)dstArchetype);
         }
-        
-        [BurstCompile]
-        static void SetChunkComponentExecute(EntityComponentStore* entityComponentStore, ArchetypeChunk* chunks, int chunkCount, void* componentData, int componentTypeIndex)
+
+        [BurstMonoInteropMethod]
+        static void _SetChunkComponent(EntityComponentStore* entityComponentStore, ArchetypeChunk* chunks, int chunkCount, void* componentData, int componentTypeIndex)
         {
             entityComponentStore->SetChunkComponent(chunks, chunkCount, componentData, componentTypeIndex);
         }
-        [BurstCompile]
-        static void CreateEntityExecute(EntityComponentStore* entityComponentStore, void* archetype, Entity* outEntities, int count)
+
+        [BurstMonoInteropMethod]
+        static void _CreateEntity(EntityComponentStore* entityComponentStore, void* archetype, Entity* outEntities, int count)
         {
             entityComponentStore->CreateEntities((Archetype*)archetype, outEntities, count);
         }
-        
-                
-        [BurstCompile]
-        static void InstantiateEntitiesExecute(EntityComponentStore* entityComponentStore, Entity* srcEntity, Entity* outputEntities, int instanceCount)
+
+        [BurstMonoInteropMethod]
+        static void _InstantiateEntities(EntityComponentStore* entityComponentStore, Entity* srcEntity, Entity* outputEntities, int instanceCount)
         {
             entityComponentStore->InstantiateEntities(*srcEntity, outputEntities, instanceCount);
         }
     }
 
-    public sealed unsafe partial class EntityManager
+    public unsafe partial struct EntityManager
     {
         // ----------------------------------------------------------------------------------------------------------
         // PUBLIC
@@ -167,7 +115,8 @@ namespace Unity.Entities
         [StructuralChangeMethod]
         public bool AddComponent(Entity entity, ComponentType componentType)
         {
-            return m_EntityDataAccess.AddComponent(entity, componentType);
+            var access = GetCheckedEntityDataAccess();
+            return access->AddComponent(entity, componentType);
         }
 
         /// <summary>
@@ -217,13 +166,18 @@ namespace Unity.Entities
         [StructuralChangeMethod]
         public void AddComponent(EntityQuery entityQuery, ComponentType componentType)
         {
-            Unity.Entities.EntityComponentStore.AssertValidEntityQuery(entityQuery, EntityComponentStore);
-            if (entityQuery.IsEmptyIgnoreFilter)
+            var access = GetCheckedEntityDataAccess();
+            var ecs = access->EntityComponentStore;
+            var queryImpl = entityQuery._GetImpl();
+
+            Unity.Entities.EntityComponentStore.AssertValidEntityQuery(entityQuery, ecs);
+
+            if (queryImpl->IsEmptyIgnoreFilter)
                 return;
-            
-            m_EntityDataAccess.AddComponent(entityQuery._QueryData->MatchingArchetypes, entityQuery._Filter, componentType);
+
+            access->AddComponent(queryImpl->_QueryData->MatchingArchetypes, queryImpl->_Filter, componentType);
         }
-        
+
         /// <summary>
         /// Adds a component to a set of entities defines by the EntityQuery and
         /// sets the component of each entity in the query to the value in the component array.
@@ -234,7 +188,10 @@ namespace Unity.Entities
         [StructuralChangeMethod]
         public void AddComponentData<T>(EntityQuery entityQuery, NativeArray<T> componentArray) where T : struct, IComponentData
         {
-            Unity.Entities.EntityComponentStore.AssertValidEntityQuery(entityQuery, EntityComponentStore);
+            var access = GetCheckedEntityDataAccess();
+            var ecs = access->EntityComponentStore;
+
+            Unity.Entities.EntityComponentStore.AssertValidEntityQuery(entityQuery, ecs);
             if (entityQuery.IsEmptyIgnoreFilter)
                 return;
 
@@ -250,7 +207,7 @@ namespace Unity.Entities
                     componentData[entities[i]] = componentArray[i];
             }
         }
-        
+
         /// <summary>
         /// Adds a component to a set of entities defined by a EntityQuery.
         /// </summary>
@@ -272,7 +229,7 @@ namespace Unity.Entities
         {
             AddComponent(entityQuery, ComponentType.ReadWrite<T>());
         }
-        
+
         /// <summary>
         /// Adds a component to a set of entities.
         /// </summary>
@@ -295,51 +252,53 @@ namespace Unity.Entities
         [StructuralChangeMethod]
         public void AddComponent(NativeArray<Entity> entities, ComponentType componentType)
         {
+            var access = GetCheckedEntityDataAccess();
+            var ecs = access->EntityComponentStore;
+            var mcs = access->ManagedComponentStore;
+
             if (componentType.IsChunkComponent)
                 throw new ArgumentException($"Cannot add ChunkComponent {componentType.ToString()} on NativeArray of entities.");
-                
+
             if (entities.Length == 0)
                 return;
 
             for (int i = 0; i < entities.Length; i++)
             {
-                EntityComponentStore->AssertCanAddComponent(entities[i], componentType);
+                ecs->AssertCanAddComponent(entities[i], componentType);
             }
 
             BeforeStructuralChange();
-            var archetypeChanges = EntityComponentStore->BeginArchetypeChangeTracking();
+            var archetypeChanges = ecs->BeginArchetypeChangeTracking();
 
             if (entities.Length <= 10)
             {
                 for (int i = 0; i < entities.Length; i++)
                 {
                     var entity = entities[i];
-                    StructuralChange.AddComponentEntity(EntityComponentStore, &entity, componentType.TypeIndex);
+                    StructuralChange.AddComponentEntity(ecs, &entity, componentType.TypeIndex);
                 }
             }
             else
             {
                 NativeList<EntityBatchInChunk> entityBatchList;
-                var batchesValid = m_EntityComponentStore->CreateEntityBatchListForAddComponent(entities, componentType, out entityBatchList);
+                var batchesValid = ecs->CreateEntityBatchListForAddComponent(entities, componentType, out entityBatchList);
                 if (!batchesValid)
                 {
                     for (int i = 0; i < entities.Length; i++)
                     {
                         var entity = entities[i];
-                        StructuralChange.AddComponentEntity(EntityComponentStore, &entity, componentType.TypeIndex);
+                        StructuralChange.AddComponentEntity(ecs, &entity, componentType.TypeIndex);
                     }
-
                 }
                 else
                 {
-                    StructuralChange.AddComponentEntitiesBatch(EntityComponentStore, (UnsafeList*)NativeListUnsafeUtility.GetInternalListDataPtrUnchecked(ref entityBatchList), componentType.TypeIndex);
+                    StructuralChange.AddComponentEntitiesBatch(ecs, (UnsafeList*)NativeListUnsafeUtility.GetInternalListDataPtrUnchecked(ref entityBatchList), componentType.TypeIndex);
                     entityBatchList.Dispose();
                 }
             }
-            
-            var changedArchetypes = EntityComponentStore->EndArchetypeChangeTracking(archetypeChanges);
-            EntityQueryManager.AddAdditionalArchetypes(changedArchetypes);
-            ManagedComponentStore.Playback(ref EntityComponentStore->ManagedChangesTracker);
+
+            ecs->EndArchetypeChangeTracking(archetypeChanges, access->EntityQueryManager);
+            mcs.Playback(ref ecs->ManagedChangesTracker);
         }
 
         /// <summary>
@@ -364,43 +323,46 @@ namespace Unity.Entities
         {
             if (entities.Length == 0)
                 return;
-            
+
+            var access = GetCheckedEntityDataAccess();
+            var ecs = access->EntityComponentStore;
+            var mcs = access->ManagedComponentStore;
+
             BeforeStructuralChange();
-            var archetypeChanges = EntityComponentStore->BeginArchetypeChangeTracking();
-            
+            var archetypeChanges = ecs->BeginArchetypeChangeTracking();
+
             // For few entities, do on main thread.
             if (entities.Length <= 10)
             {
                 for (int i = 0; i < entities.Length; i++)
                 {
                     var entity = entities[i];
-                    EntityComponentStore->AssertCanRemoveComponent(entity, componentType);
-                    StructuralChange.RemoveComponentEntity(EntityComponentStore, &entity, componentType.TypeIndex);
+                    ecs->AssertCanRemoveComponent(entity, componentType);
+                    StructuralChange.RemoveComponentEntity(ecs, &entity, componentType.TypeIndex);
                 }
             }
             // For many entities, resort data into batches.
             else
             {
                 NativeList<EntityBatchInChunk> entityBatchList;
-                var batchesValid = m_EntityComponentStore->CreateEntityBatchListForRemoveComponent(entities, componentType, out entityBatchList);
+                var batchesValid = ecs->CreateEntityBatchListForRemoveComponent(entities, componentType, out entityBatchList);
                 if (!batchesValid)
                 {
                     for (int i = 0; i < entities.Length; i++)
                     {
                         var entity = entities[i];
-                        EntityComponentStore->AssertCanRemoveComponent(entity, componentType);
-                        StructuralChange.RemoveComponentEntity(EntityComponentStore, &entity, componentType.TypeIndex);
+                        ecs->AssertCanRemoveComponent(entity, componentType);
+                        StructuralChange.RemoveComponentEntity(ecs, &entity, componentType.TypeIndex);
                     }
                 }
                 else
                 {
-                    StructuralChange.RemoveComponentEntitiesBatch(EntityComponentStore, (UnsafeList*)NativeListUnsafeUtility.GetInternalListDataPtrUnchecked(ref entityBatchList), componentType.TypeIndex);
+                    StructuralChange.RemoveComponentEntitiesBatch(ecs, (UnsafeList*)NativeListUnsafeUtility.GetInternalListDataPtrUnchecked(ref entityBatchList), componentType.TypeIndex);
                     entityBatchList.Dispose();
                 }
             }
-            var changedArchetypes = EntityComponentStore->EndArchetypeChangeTracking(archetypeChanges);
-            EntityQueryManager.AddAdditionalArchetypes(changedArchetypes);
-            ManagedComponentStore.Playback(ref EntityComponentStore->ManagedChangesTracker);
+            ecs->EndArchetypeChangeTracking(archetypeChanges, access->EntityQueryManager);
+            mcs.Playback(ref ecs->ManagedChangesTracker);
         }
 
         /// <summary>
@@ -450,16 +412,19 @@ namespace Unity.Entities
         [StructuralChangeMethod]
         public void AddComponents(Entity entity, ComponentTypes types)
         {
-            EntityComponentStore->AssertCanAddComponents(entity, types);
-            
+            var access = GetCheckedEntityDataAccess();
+            var ecs = access->EntityComponentStore;
+            var mcs = access->ManagedComponentStore;
+
+            ecs->AssertCanAddComponents(entity, types);
+
             BeforeStructuralChange();
-            var archetypeChanges = EntityComponentStore->BeginArchetypeChangeTracking();
-            
-            EntityComponentStore->AddComponents(entity, types);
-            
-            var changedArchetypes = EntityComponentStore->EndArchetypeChangeTracking(archetypeChanges);
-            EntityQueryManager.AddAdditionalArchetypes(changedArchetypes);
-            ManagedComponentStore.Playback(ref EntityComponentStore->ManagedChangesTracker);
+            var archetypeChanges = ecs->BeginArchetypeChangeTracking();
+
+            ecs->AddComponents(entity, types);
+
+            ecs->EndArchetypeChangeTracking(archetypeChanges, access->EntityQueryManager);
+            mcs.Playback(ref ecs->ManagedChangesTracker);
         }
 
         /// <summary>
@@ -479,7 +444,8 @@ namespace Unity.Entities
         [StructuralChangeMethod]
         public bool RemoveComponent(Entity entity, ComponentType componentType)
         {
-            return m_EntityDataAccess.RemoveComponent(entity, componentType);
+            var access = GetCheckedEntityDataAccess();
+            return access->RemoveComponent(entity, componentType);
         }
 
         /// <summary>
@@ -499,12 +465,17 @@ namespace Unity.Entities
         [StructuralChangeMethod]
         public void RemoveComponent(EntityQuery entityQuery, ComponentType componentType)
         {
-            Unity.Entities.EntityComponentStore.AssertValidEntityQuery(entityQuery, EntityComponentStore);
+            var access = GetCheckedEntityDataAccess();
+            var ecs = access->EntityComponentStore;
 
-            if (entityQuery.IsEmptyIgnoreFilter)
+            Unity.Entities.EntityComponentStore.AssertValidEntityQuery(entityQuery, ecs);
+            var queryImpl = entityQuery._GetImpl();
+
+            if (queryImpl->IsEmptyIgnoreFilter)
                 return;
-            
-            RemoveComponent(entityQuery._QueryData->MatchingArchetypes, entityQuery._Filter, componentType);
+
+
+            RemoveComponent(queryImpl->_QueryData->MatchingArchetypes, queryImpl->_Filter, componentType);
         }
 
         /// <summary>
@@ -524,14 +495,17 @@ namespace Unity.Entities
         [StructuralChangeMethod]
         public void RemoveComponent(EntityQuery entityQuery, ComponentTypes types)
         {
-            Unity.Entities.EntityComponentStore.AssertValidEntityQuery(entityQuery, EntityComponentStore);
+            var access = GetCheckedEntityDataAccess();
+            var ecs = access->EntityComponentStore;
+
+            Unity.Entities.EntityComponentStore.AssertValidEntityQuery(entityQuery, ecs);
 
             if (entityQuery.IsEmptyIgnoreFilter)
                 return;
 
             if (entityQuery.CalculateEntityCount() == 0)
                 return;
-            
+
 
             // @TODO: Opportunity to do all components in batch on a per chunk basis.
             for (int i = 0; i != types.Length; i++)
@@ -598,14 +572,13 @@ namespace Unity.Entities
             RemoveComponent(entities, ComponentType.ReadWrite<T>());
         }
 
-
         /// <summary>
         /// Adds a component to an entity and set the value of that component. Returns true if the component was added,
         /// false if the entity already had the component. (The component's data is set either way.)
         /// </summary>
         /// <remarks>
         /// Adding a component changes an entity's archetype and results in the entity being moved to a different
-        /// chunk. 
+        /// chunk.
         ///
         /// **Important:** This function creates a sync point, which means that the EntityManager waits for all
         /// currently running Jobs to complete before adding the component and no additional Jobs can start before
@@ -623,7 +596,7 @@ namespace Unity.Entities
             var added = AddComponent(entity, type);
             if (!type.IsZeroSized)
                 SetComponentData(entity, componentData);
-            
+
             return added;
         }
 
@@ -671,7 +644,7 @@ namespace Unity.Entities
         [StructuralChangeMethod]
         public bool AddChunkComponentData<T>(Entity entity) where T : struct, IComponentData
         {
-            return AddComponent(entity, ComponentType.ChunkComponent<T>()); 
+            return AddComponent(entity, ComponentType.ChunkComponent<T>());
         }
 
         /// <summary>
@@ -693,9 +666,13 @@ namespace Unity.Entities
         /// <param name="componentData">The data to set.</param>
         /// <typeparam name="T">The type of component, which must implement IComponentData.</typeparam>
         [StructuralChangeMethod]
-        public void AddChunkComponentData<T>(EntityQuery entityQuery, T componentData) where T : unmanaged, IComponentData 
+        public void AddChunkComponentData<T>(EntityQuery entityQuery, T componentData) where T : unmanaged, IComponentData
         {
-            Unity.Entities.EntityComponentStore.AssertValidEntityQuery(entityQuery, EntityComponentStore);
+            var access = GetCheckedEntityDataAccess();
+            var ecs = access->EntityComponentStore;
+            var mcs = access->ManagedComponentStore;
+
+            Unity.Entities.EntityComponentStore.AssertValidEntityQuery(entityQuery, ecs);
 
             if (entityQuery.IsEmptyIgnoreFilter)
                 return;
@@ -704,23 +681,22 @@ namespace Unity.Entities
             {
                 if (chunks.Length == 0)
                     return;
-                
-                EntityComponentStore->AssertCanAddChunkComponent(chunks, ComponentType.ChunkComponent<T>());
-                
+
+                ecs->AssertCanAddChunkComponent(chunks, ComponentType.ChunkComponent<T>());
+
                 BeforeStructuralChange();
-                var archetypeChanges = EntityComponentStore->BeginArchetypeChangeTracking();
-                
+                var archetypeChanges = ecs->BeginArchetypeChangeTracking();
+
                 var componentType = ComponentType.ReadWrite<T>();
                 var componentTypeIndex = componentType.TypeIndex;
                 var componentTypeIndexForAdd = TypeManager.MakeChunkComponentTypeIndex(componentTypeIndex);
                 ArchetypeChunk* chunkPtr = (ArchetypeChunk*)NativeArrayUnsafeUtility.GetUnsafePtr(chunks);
 
-                StructuralChange.AddComponentChunks(EntityComponentStore, chunkPtr, chunks.Length, componentTypeIndexForAdd);
-                StructuralChange.SetChunkComponent(EntityComponentStore, chunkPtr, chunks.Length, &componentData, componentTypeIndex);
+                StructuralChange.AddComponentChunks(ecs, chunkPtr, chunks.Length, componentTypeIndexForAdd);
+                StructuralChange.SetChunkComponent(ecs, chunkPtr, chunks.Length, &componentData, componentTypeIndex);
 
-                var changedArchetypes = EntityComponentStore->EndArchetypeChangeTracking(archetypeChanges);
-                EntityQueryManager.AddAdditionalArchetypes(changedArchetypes);
-                ManagedComponentStore.Playback(ref EntityComponentStore->ManagedChangesTracker);
+                ecs->EndArchetypeChangeTracking(archetypeChanges, access->EntityQueryManager);
+                mcs.Playback(ref ecs->ManagedChangesTracker);
             }
         }
 
@@ -827,7 +803,10 @@ namespace Unity.Entities
         [StructuralChangeMethod]
         public bool AddSharedComponentData<T>(Entity entity, T componentData) where T : struct, ISharedComponentData
         {
-            return m_EntityDataAccess.AddSharedComponentData(entity, componentData);
+            var access = GetCheckedEntityDataAccess();
+            var mcs = access->ManagedComponentStore;
+
+            return access->AddSharedComponentData(entity, componentData, mcs);
         }
 
         /// <summary>
@@ -852,41 +831,48 @@ namespace Unity.Entities
         public void AddSharedComponentData<T>(EntityQuery entityQuery, T componentData)
             where T : struct, ISharedComponentData
         {
-            Unity.Entities.EntityComponentStore.AssertValidEntityQuery(entityQuery, EntityComponentStore);
+            var access = GetCheckedEntityDataAccess();
+            var ecs = access->EntityComponentStore;
+            var mcs = access->ManagedComponentStore;
+
+            Unity.Entities.EntityComponentStore.AssertValidEntityQuery(entityQuery, ecs);
 
             if (entityQuery.IsEmptyIgnoreFilter)
                 return;
-            
+
             var componentType = ComponentType.ReadWrite<T>();
             using (var chunks = entityQuery.CreateArchetypeChunkArray(Allocator.TempJob))
             {
                 if (chunks.Length == 0)
                     return;
-                var newSharedComponentDataIndex = ManagedComponentStore.InsertSharedComponent(componentData);
-                m_EntityDataAccess.AddSharedComponentData(chunks, newSharedComponentDataIndex, componentType);
-                m_ManagedComponentStore.RemoveReference(newSharedComponentDataIndex);
+                var newSharedComponentDataIndex = mcs.InsertSharedComponent(componentData);
+                access->AddSharedComponentData(chunks, newSharedComponentDataIndex, componentType);
+                mcs.RemoveReference(newSharedComponentDataIndex);
             }
         }
 
         [StructuralChangeMethod]
         public void SetArchetype(Entity entity, EntityArchetype archetype)
         {
-            Unity.Entities.EntityComponentStore.AssertValidArchetype(EntityComponentStore, archetype);
-            EntityComponentStore->AssertEntitiesExist(&entity, 1);
-            
-            var oldArchetype = EntityComponentStore->GetArchetype(entity);
-            var newArchetype = archetype.Archetype;
-            
-            Unity.Entities.EntityComponentStore.AssertArchetypeDoesNotRemoveSystemStateComponents(oldArchetype, newArchetype);
-            
-            BeforeStructuralChange();
-            var archetypeChanges = EntityComponentStore->BeginArchetypeChangeTracking();
-            
-            StructuralChange.MoveEntityArchetype(EntityComponentStore, &entity, archetype.Archetype);
+            var access = GetCheckedEntityDataAccess();
+            var ecs = access->EntityComponentStore;
+            var mcs = access->ManagedComponentStore;
 
-            var changedArchetypes = EntityComponentStore->EndArchetypeChangeTracking(archetypeChanges);
-            EntityQueryManager.AddAdditionalArchetypes(changedArchetypes);
-            ManagedComponentStore.Playback(ref EntityComponentStore->ManagedChangesTracker);
+            Unity.Entities.EntityComponentStore.AssertValidArchetype(ecs, archetype);
+            ecs->AssertEntitiesExist(&entity, 1);
+
+            var oldArchetype = ecs->GetArchetype(entity);
+            var newArchetype = archetype.Archetype;
+
+            Unity.Entities.EntityComponentStore.AssertArchetypeDoesNotRemoveSystemStateComponents(oldArchetype, newArchetype);
+
+            BeforeStructuralChange();
+            var archetypeChanges = ecs->BeginArchetypeChangeTracking();
+
+            StructuralChange.MoveEntityArchetype(ecs, &entity, archetype.Archetype);
+
+            ecs->EndArchetypeChangeTracking(archetypeChanges, access->EntityQueryManager);
+            mcs.Playback(ref ecs->ManagedChangesTracker);
         }
 
         /// <summary>
@@ -935,9 +921,10 @@ namespace Unity.Entities
 
         void RemoveComponent(UnsafeMatchingArchetypePtrList archetypeList, EntityQueryFilter filter, ComponentType componentType)
         {
-            m_EntityDataAccess.RemoveComponent(archetypeList, filter, componentType);
+            var access = GetCheckedEntityDataAccess();
+            access->RemoveComponent(archetypeList, filter, componentType);
         }
-        
+
         // these are used by tiny, do not remove
         [UsedImplicitly]
         internal void AddComponentRaw(Entity entity, int typeIndex) => AddComponent(entity, ComponentType.FromTypeIndex(typeIndex));
@@ -954,7 +941,7 @@ namespace Unity.Entities
         /// <remarks>
         /// Adding a component changes an entity's archetype and results in the entity being moved to a different
         /// chunk.
-        /// 
+        ///
         /// **Important:** This function creates a sync point, which means that the EntityManager waits for all
         /// currently running Jobs to complete before adding the component and no additional Jobs can start before
         /// the function is finished. A sync point can cause a drop in performance because the ECS framework may not
@@ -1015,42 +1002,41 @@ namespace Unity.Entities
         /// <typeparam name="T">The type of component, which must implement IComponentData.</typeparam>
         public static void AddChunkComponentData<T>(this EntityManager manager, EntityQuery entityQuery, T componentData) where T : class, IComponentData
         {
-            EntityComponentStore.AssertValidEntityQuery(entityQuery, manager.EntityComponentStore);
-            
+            var access = manager.GetCheckedEntityDataAccess();
+            var ecs = access->EntityComponentStore;
+            var mcs = access->ManagedComponentStore;
+
+            EntityComponentStore.AssertValidEntityQuery(entityQuery, ecs);
+
             using (var chunks = entityQuery.CreateArchetypeChunkArray(Allocator.TempJob))
             {
                 if (chunks.Length == 0)
                     return;
-                
-                manager.EntityComponentStore->AssertCanAddChunkComponent(chunks, ComponentType.ChunkComponent<T>());
-                
+
+                ecs->AssertCanAddChunkComponent(chunks, ComponentType.ChunkComponent<T>());
+
                 manager.BeforeStructuralChange();
-                var archetypeChanges = manager.EntityComponentStore->BeginArchetypeChangeTracking();
+                var archetypeChanges = ecs->BeginArchetypeChangeTracking();
 
                 var type = ComponentType.ReadWrite<T>();
                 var chunkType = ComponentType.FromTypeIndex(TypeManager.MakeChunkComponentTypeIndex(type.TypeIndex));
-                
-                StructuralChange.AddComponentChunks(manager.EntityComponentStore, (ArchetypeChunk*)NativeArrayUnsafeUtility.GetUnsafePtr(chunks), chunks.Length, chunkType.TypeIndex);
 
-                var changedArchetypes = manager.EntityComponentStore->EndArchetypeChangeTracking(archetypeChanges);
-                manager.EntityQueryManager.AddAdditionalArchetypes(changedArchetypes);
-                manager.ManagedComponentStore.Playback(ref manager.EntityComponentStore->ManagedChangesTracker);
-                
+                StructuralChange.AddComponentChunks(ecs, (ArchetypeChunk*)NativeArrayUnsafeUtility.GetUnsafePtr(chunks), chunks.Length, chunkType.TypeIndex);
+
+                ecs->EndArchetypeChangeTracking(archetypeChanges, access->EntityQueryManager);
+                mcs.Playback(ref ecs->ManagedChangesTracker);
+
                 manager.SetChunkComponent(chunks, componentData);
             }
         }
 
         static void SetChunkComponent<T>(this EntityManager manager, NativeArray<ArchetypeChunk> chunks, T componentData) where T : class, IComponentData
         {
-            var type = TypeManager.MakeChunkComponentTypeIndex(TypeManager.GetTypeIndex<T>());
-
+            var type = TypeManager.GetTypeIndex<T>();
             for (int i = 0; i < chunks.Length; i++)
             {
                 var srcChunk = chunks[i].m_Chunk;
-                var indexInTypeArray = ChunkDataUtility.GetIndexInTypeArray(srcChunk->Archetype, type);
-
-                var entityInChunk = manager.EntityComponentStore->GetEntityInChunk(srcChunk->metaChunkEntity);
-                manager.ManagedComponentStore.SetManagedObject(entityInChunk.Chunk, indexInTypeArray, entityInChunk.IndexInChunk, componentData);
+                manager.SetComponentData<T>(srcChunk->metaChunkEntity, componentData);
             }
         }
     }

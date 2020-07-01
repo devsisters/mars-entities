@@ -1,22 +1,18 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Runtime.CompilerServices;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
-using Mono.Collections.Generic;
 using Unity.Burst;
 using Unity.Collections.LowLevel.Unsafe;
 using Unity.Entities.CodeGeneratedJobForEach;
-using Unity.Entities.UniversalDelegates;
 using Unity.Jobs;
+using Unity.Profiling;
 using CustomAttributeNamedArgument = Mono.Cecil.CustomAttributeNamedArgument;
 using FieldAttributes = Mono.Cecil.FieldAttributes;
 using MethodAttributes = Mono.Cecil.MethodAttributes;
 using MethodBody = Mono.Cecil.Cil.MethodBody;
-using MethodImplAttributes = System.Reflection.MethodImplAttributes;
 using ParameterAttributes = Mono.Cecil.ParameterAttributes;
 using TypeAttributes = Mono.Cecil.TypeAttributes;
 
@@ -36,8 +32,8 @@ namespace Unity.Entities.CodeGen
         public FieldReference[] ChainOfFieldsToOldField;
         public FieldReference NewField;
     }
-    
-    internal class JobStructForLambdaJob
+
+    class JobStructForLambdaJob
     {
         public LambdaJobDescriptionConstruction LambdaJobDescriptionConstruction { get; }
         public TypeDefinition TypeDefinition;
@@ -52,12 +48,13 @@ namespace Unity.Entities.CodeGen
         public MethodDefinition DeallocateOnCompletionMethod;
         public MethodDefinition ExecuteMethod;
         public FieldDefinition SystemInstanceField;
-        
+
         public MethodDefinition[] ClonedMethods;
         public MethodDefinition ClonedLambdaBody => ClonedMethods.First();
-        
+
         public Dictionary<FieldReference, CapturedVariableDescription> CapturedVariables;
-        
+        LambdaJobsComponentAccessPatcher _componentAccessPatcher;
+
         static Type InterfaceTypeFor(LambdaJobDescriptionConstruction lambdaJobDescriptionConstruction)
         {
             switch (lambdaJobDescriptionConstruction.Kind)
@@ -75,58 +72,76 @@ namespace Unity.Entities.CodeGen
             }
         }
 
+        public static bool IsPermittedMethodToInvokeWithThis(MethodReference method)
+        {
+            if (!method.DeclaringType.TypeReferenceEquals(typeof(SystemBase)))
+                return false;
+            if (method.Name == nameof(SystemBase.GetComponent) ||
+                method.Name == nameof(SystemBase.SetComponent) ||
+                method.Name == nameof(SystemBase.HasComponent) ||
+                method.Name == nameof(SystemBase.GetComponentDataFromEntity))
+                return true;
+            return false;
+        }
+
         MethodDefinition AddMethod(MethodDefinition method)
         {
             TypeDefinition.Methods.Add(method);
             return method;
         }
-        
+
         FieldDefinition AddField(FieldDefinition field)
         {
             TypeDefinition.Fields.Add(field);
             return field;
         }
 
-        
         public static JobStructForLambdaJob CreateNewJobStruct(LambdaJobDescriptionConstruction lambdaJobDescriptionConstruction)
         {
             return new JobStructForLambdaJob(lambdaJobDescriptionConstruction);
         }
-        
-        JobStructForLambdaJob(LambdaJobDescriptionConstruction lambdaJobDescriptionConstruction2)
+
+        JobStructForLambdaJob(LambdaJobDescriptionConstruction lambdaJobDescriptionConstruction)
         {
-            LambdaJobDescriptionConstruction = lambdaJobDescriptionConstruction2;
+            LambdaJobDescriptionConstruction = lambdaJobDescriptionConstruction;
             var containingMethod = LambdaJobDescriptionConstruction.ContainingMethod;
 
             if (containingMethod.DeclaringType.NestedTypes.Any(t => t.Name == LambdaJobDescriptionConstruction.ClassName))
-                UserError.DC0003(LambdaJobDescriptionConstruction.LambdaJobName, containingMethod,LambdaJobDescriptionConstruction.ScheduleOrRunInvocationInstruction).Throw();
+                UserError.DC0003(LambdaJobDescriptionConstruction.LambdaJobName, containingMethod, LambdaJobDescriptionConstruction.ScheduleOrRunInvocationInstruction).Throw();
 
             var moduleDefinition = containingMethod.Module;
 
             var typeAttributes = TypeAttributes.BeforeFieldInit | TypeAttributes.Sealed |
-                                 TypeAttributes.AnsiClass | TypeAttributes.SequentialLayout |
-                                 TypeAttributes.NestedPrivate;
-            
-            TypeDefinition = new TypeDefinition(containingMethod.DeclaringType.Namespace, LambdaJobDescriptionConstruction.ClassName, 
-                typeAttributes,moduleDefinition.ImportReference(typeof(ValueType)))
+                TypeAttributes.AnsiClass | TypeAttributes.SequentialLayout |
+                TypeAttributes.NestedPrivate;
+
+            TypeDefinition = new TypeDefinition(containingMethod.DeclaringType.Namespace, LambdaJobDescriptionConstruction.ClassName,
+                typeAttributes, moduleDefinition.ImportReference(typeof(ValueType)))
             {
                 DeclaringType = containingMethod.DeclaringType
             };
+
+            TypeDefinition.CustomAttributes.Add(
+                new CustomAttribute(AttributeConstructorReferenceFor(typeof(DOTSCompilerGeneratedAttribute), TypeDefinition.Module)));
+
+            _componentAccessPatcher = new LambdaJobsComponentAccessPatcher(TypeDefinition, LambdaJobDescriptionConstruction.MethodLambdaWasEmittedAs.Parameters);
+
             var structInterfaceType = InterfaceTypeFor(LambdaJobDescriptionConstruction);
             if (structInterfaceType != null)
                 TypeDefinition.Interfaces.Add(new InterfaceImplementation(moduleDefinition.ImportReference(structInterfaceType)));
 
             containingMethod.DeclaringType.NestedTypes.Add(TypeDefinition);
 
-
-            if (LambdaJobDescriptionConstruction.LambdaWasEmittedAsInstanceMethodOnContainingType)
+            if (LambdaJobDescriptionConstruction.LambdaWasEmittedAsInstanceMethodOnContainingType && !LambdaJobDescriptionConstruction.HasAllowedMethodInvokedWithThis)
             {
                 //if you capture no locals, but you do use a field/method on the componentsystem, the lambda gets emitted as an instance method on the component system
                 //this is inconvenient for us. To make the rest of our code not have to deal with this case, we will emit an OriginalLambda method on our job type, that calls
                 //the lambda as it is emitted as an instance method on the component system.  See EntitiesForEachNonCapturingInvokingInstanceMethod test for more details.
                 //example:
                 //https://sharplab.io/#v2:CYLg1APgAgTAjAWAFBQMwAJboMLoN7LpGYZQAs6AsgJ4CSAdgM4AuAhvQMYCmlXzAFgHtgACgCU+AL6FiMomkwVK4/HOJEAogA8uHAK7MuIlQF4AfFTpM2nHnyGixYgNxrpSdVDgA2Rem26BkZeMOisYnjukkA==
-                
+                // Note, we have an exemption for the special case where we want to clone our methods into the JobStruct but we are not capturing.
+                // This occurs because we call a method on our declaring type that we will later replace with codegen.
+
                 MakeOriginalLambdaMethodThatRelaysToInstanceMethodOnComponentSystem();
             }
             else
@@ -137,14 +152,14 @@ namespace Unity.Entities.CodeGen
             var lambdaParameterValueProviderInformations = MakeLambdaParameterValueProviderInformations();
 
             MakeDeallocateOnCompletionMethod();
-            
+
             if (LambdaJobDescriptionConstruction.WithStructuralChanges)
                 AddStructuralChangeMembers(lambdaParameterValueProviderInformations);
-            
+
             ExecuteMethod = MakeExecuteMethod(lambdaParameterValueProviderInformations);
 
             ScheduleTimeInitializeMethod = AddMethod(MakeScheduleTimeInitializeMethod(lambdaParameterValueProviderInformations));
-            
+
             if (!LambdaJobDescriptionConstruction.WithStructuralChanges)
             {
                 AddRunWithoutJobSystemMembers();
@@ -152,7 +167,7 @@ namespace Unity.Entities.CodeGen
             }
         }
 
-        private void MakeDeallocateOnCompletionMethod()
+        void MakeDeallocateOnCompletionMethod()
         {
             //we only have to clean up ourselves, in Run execution mode.
             if (LambdaJobDescriptionConstruction.ExecutionMode != ExecutionMode.Run)
@@ -161,7 +176,7 @@ namespace Unity.Entities.CodeGen
             var fieldsToDeallocate =
                 LambdaJobDescriptionConstruction.InvokedConstructionMethods
                     .Where(m => m.MethodName ==
-                                nameof(LambdaJobDescriptionConstructionMethods.WithDeallocateOnJobCompletion))
+                        nameof(LambdaJobDescriptionConstructionMethods.WithDeallocateOnJobCompletion))
                     .Select(ca => ca.Arguments.Single())
                     .Cast<FieldDefinition>()
                     .ToList();
@@ -169,24 +184,24 @@ namespace Unity.Entities.CodeGen
             if (!fieldsToDeallocate.Any())
                 return;
 
-            DeallocateOnCompletionMethod = AddMethod(new MethodDefinition("DeallocateOnCompletionMethod",MethodAttributes.Public, TypeSystem.Void));
+            DeallocateOnCompletionMethod = AddMethod(new MethodDefinition("DeallocateOnCompletionMethod", MethodAttributes.Public, TypeSystem.Void));
             var ilProcessor = DeallocateOnCompletionMethod.Body.GetILProcessor();
-            
+
             foreach (var fieldToDeallocate in fieldsToDeallocate)
             {
                 var capturedVariable = CapturedVariables[fieldToDeallocate];
                 ilProcessor.Emit(OpCodes.Ldarg_0);
                 ilProcessor.Emit(OpCodes.Ldflda, capturedVariable.NewField);
-                
+
                 var disposeReference = new MethodReference("Dispose", TypeSystem.Void, capturedVariable.NewField.FieldType){HasThis = true};
                 var disposeMethod = ImportReference(disposeReference);
                 //todo: check for null
-                
+
                 ilProcessor.Emit(OpCodes.Call, disposeMethod);
             }
             ilProcessor.Emit(OpCodes.Ret);
         }
-        
+
         void AddRunWithoutJobSystemMembers()
         {
             if (LambdaJobDescriptionConstruction.ExecutionMode != ExecutionMode.Run)
@@ -194,42 +209,44 @@ namespace Unity.Entities.CodeGen
 
             RunWithoutJobSystemMethod = CreateRunWithoutJobSystemMethod(TypeDefinition);
 
-            RunWithoutJobSystemDelegateFieldNoBurst = AddField(new FieldDefinition("s_RunWithoutJobSystemDelegateFieldNoBurst", FieldAttributes.Static,ImportReference(ExecuteDelegateType)));
+            RunWithoutJobSystemDelegateFieldNoBurst = AddField(new FieldDefinition("s_RunWithoutJobSystemDelegateFieldNoBurst", FieldAttributes.Static, ImportReference(ExecuteDelegateType)));
 
             if (LambdaJobDescriptionConstruction.UsesBurst)
-                RunWithoutJobSystemDelegateFieldBurst = AddField(new FieldDefinition("s_RunWithoutJobSystemDelegateFieldBurst", FieldAttributes.Static,ImportReference(ExecuteDelegateType)));
+                RunWithoutJobSystemDelegateFieldBurst = AddField(new FieldDefinition("s_RunWithoutJobSystemDelegateFieldBurst", FieldAttributes.Static, ImportReference(ExecuteDelegateType)));
         }
 
         void AddStructuralChangeMembers(LambdaParameterValueInformations providerInformations)
         {
-            // Add our PerformLambda method to just do the work of setting up our parameters, calling into the original lambda and doing write-back
-            PerformLambdaMethod = CreateStructuralChangesPerformLambdaMethod(providerInformations);
-            
-            // Perform lambda delegate field so that we can move most of the work in IterateEntities into StructuralChangeEntityProvider.IterateEntities
-            PerformLambdaDelegateField = new FieldDefinition("_performLambdaDelegate", FieldAttributes.Public | FieldAttributes.Static, 
-                ImportReference(typeof(StructuralChangeEntityProvider.PerformLambdaDelegate)));
-            AddField(PerformLambdaDelegateField);
-
-            // Add static constructor to set the above lambda delegate field
+            // Add static constructor
             var cctor = new MethodDefinition(".cctor",
                 MethodAttributes.Static | MethodAttributes.Public | MethodAttributes.HideBySig |
                 MethodAttributes.SpecialName | MethodAttributes.RTSpecialName, TypeSystem.Void);
             AddMethod(cctor);
-
             var ilProcessor = cctor.Body.GetILProcessor();
+
+            if (LambdaJobDescriptionConstruction.WithStructuralChanges)
+                // Add our PerformLambda method to just do the work of setting up our parameters, calling into the original lambda and doing write-back
+                PerformLambdaMethod = CreateStructuralChangesPerformLambdaMethod(providerInformations);
+
+            // Perform lambda delegate field so that we can move most of the work in IterateEntities into StructuralChangeEntityProvider.IterateEntities
+            PerformLambdaDelegateField = new FieldDefinition("_performLambdaDelegate", FieldAttributes.Public | FieldAttributes.Static,
+                ImportReference(typeof(StructuralChangeEntityProvider.PerformLambdaDelegate)));
+            AddField(PerformLambdaDelegateField);
+
             ilProcessor.Emit(OpCodes.Ldnull);
             ilProcessor.Emit(OpCodes.Ldftn, PerformLambdaMethod);
-            
+
             var performLambdaDelegateConstructor =
                 TypeDefinition.Module.ImportReference(typeof(StructuralChangeEntityProvider.PerformLambdaDelegate).GetConstructors().First());
             ilProcessor.Emit(OpCodes.Newobj, performLambdaDelegateConstructor);
             ilProcessor.Emit(OpCodes.Stsfld, PerformLambdaDelegateField);
+
             ilProcessor.Emit(OpCodes.Ret);
         }
 
-        public Type ExecuteDelegateType => LambdaJobDescriptionConstruction.Kind == LambdaJobDescriptionKind.Job 
-            ? typeof(InternalCompilerInterface.JobRunWithoutJobSystemDelegate) 
-            : typeof(InternalCompilerInterface.JobChunkRunWithoutJobSystemDelegate);
+        public Type ExecuteDelegateType => LambdaJobDescriptionConstruction.Kind == LambdaJobDescriptionKind.Job
+        ? typeof(InternalCompilerInterface.JobRunWithoutJobSystemDelegate)
+        : typeof(InternalCompilerInterface.JobChunkRunWithoutJobSystemDelegate);
 
         TypeReference ImportReference(Type t) => TypeDefinition.Module.ImportReference(t);
         TypeReference ImportReference(TypeReference t) => TypeDefinition.Module.ImportReference(t);
@@ -247,11 +264,11 @@ namespace Unity.Entities.CodeGen
                     return null;
                 case LambdaJobDescriptionKind.Chunk:
                     var allUsedParametersOfEntitiesForEachInvocations = ClonedMethods.SelectMany(
-                            m =>
-                                m.Body.Instructions.Where(IsChunkEntitiesForEachInvocation).Select(i =>
-                                    (m,
-                                        LambdaJobDescriptionConstruction.AnalyzeForEachInvocationInstruction(m, i)
-                                            .MethodLambdaWasEmittedAs)))
+                        m =>
+                            m.Body.Instructions.Where(IsChunkEntitiesForEachInvocation).Select(i =>
+                                (m,
+                                    LambdaJobDescriptionConstruction.AnalyzeForEachInvocationInstruction(m, i)
+                                        .MethodLambdaWasEmittedAs)))
                         .SelectMany(m_and_dem => m_and_dem.MethodLambdaWasEmittedAs.Parameters.Select(p => (m_and_dem.m, p)))
                         .ToArray();
                     return LambdaParameterValueInformations.For(this, false);
@@ -260,7 +277,7 @@ namespace Unity.Entities.CodeGen
             }
         }
 
-        private MethodDefinition MakeExecuteMethod(LambdaParameterValueInformations lambdaParameterValueInformations)
+        MethodDefinition MakeExecuteMethod(LambdaParameterValueInformations lambdaParameterValueInformations)
         {
             switch (LambdaJobDescriptionConstruction.Kind)
             {
@@ -294,7 +311,7 @@ namespace Unity.Entities.CodeGen
                         if (!fieldDefinition.DeclaringType.IsDisplayClass())
                             UserError.DC0038(containingMethod, fieldDefinition, constructionMethod).Throw();
                         attribute.CheckAttributeApplicable?.Invoke(containingMethod, constructionMethod, fieldDefinition)?.Throw();
-                        
+
                         if (!CapturedVariables.TryGetValue(fieldDefinition, out var capturedVariable))
                             InternalCompilerError.DCICE007(containingMethod, constructionMethod).Throw();
                         var correspondingJobField = capturedVariable.NewField.Resolve();
@@ -307,37 +324,37 @@ namespace Unity.Entities.CodeGen
             }
         }
 
-        private  MethodDefinition CreateRunWithoutJobSystemMethod(TypeDefinition newJobStruct)
+        MethodDefinition CreateRunWithoutJobSystemMethod(TypeDefinition newJobStruct)
         {
             var moduleDefinition = newJobStruct.Module;
             var result =
                 new MethodDefinition("RunWithoutJobSystem", MethodAttributes.Public | MethodAttributes.Static, moduleDefinition.TypeSystem.Void)
+            {
+                HasThis = false,
+                Parameters =
                 {
-                    HasThis = false,
-                    Parameters =
-                    {
-                        new ParameterDefinition("jobData", ParameterAttributes.None, new PointerType(moduleDefinition.TypeSystem.Void)),
-                    },
-                };
+                    new ParameterDefinition("jobData", ParameterAttributes.None, new PointerType(moduleDefinition.TypeSystem.Void)),
+                },
+            };
             newJobStruct.Methods.Add(result);
 
             var ilProcessor = result.Body.GetILProcessor();
             if (LambdaJobDescriptionConstruction.Kind != LambdaJobDescriptionKind.Job)
             {
-                result.Parameters.Insert(0,new ParameterDefinition("archetypeChunkIterator", ParameterAttributes.None,new PointerType(moduleDefinition.ImportReference(typeof(ArchetypeChunkIterator)))));
+                result.Parameters.Insert(0, new ParameterDefinition("archetypeChunkIterator", ParameterAttributes.None, new PointerType(moduleDefinition.ImportReference(typeof(ArchetypeChunkIterator)))));
                 ilProcessor.Emit(OpCodes.Ldarg_1);
-                ilProcessor.Emit(OpCodes.Call,moduleDefinition.ImportReference(typeof(UnsafeUtilityEx).GetMethod(nameof(UnsafeUtilityEx.AsRef),BindingFlags.Public | BindingFlags.Static)).MakeGenericInstanceMethod(newJobStruct));
+                ilProcessor.Emit(OpCodes.Call, moduleDefinition.ImportReference(typeof(UnsafeUtilityEx).GetMethod(nameof(UnsafeUtilityEx.AsRef), BindingFlags.Public | BindingFlags.Static)).MakeGenericInstanceMethod(newJobStruct));
                 ilProcessor.Emit(OpCodes.Ldarg_0);
-                ilProcessor.Emit(OpCodes.Call,moduleDefinition.ImportReference(typeof(JobChunkExtensions).GetMethod(nameof(JobChunkExtensions.RunWithoutJobs),BindingFlags.Public | BindingFlags.Static)).MakeGenericInstanceMethod(newJobStruct));
+                ilProcessor.Emit(OpCodes.Call, moduleDefinition.ImportReference(typeof(JobChunkExtensions).GetMethod(nameof(JobChunkExtensions.RunWithoutJobs), BindingFlags.Public | BindingFlags.Static)).MakeGenericInstanceMethod(newJobStruct));
                 ilProcessor.Emit(OpCodes.Ret);
                 return result;
             }
             else
             {
                 ilProcessor.Emit(OpCodes.Ldarg_0);
-                ilProcessor.Emit(OpCodes.Call,ExecuteMethod);
+                ilProcessor.Emit(OpCodes.Call, ExecuteMethod);
                 ilProcessor.Emit(OpCodes.Ret);
-                return result;    
+                return result;
             }
         }
 
@@ -347,31 +364,64 @@ namespace Unity.Entities.CodeGen
 
             if (LambdaJobDescriptionConstruction.ExecutionMode != ExecutionMode.Run)
                 VerifyClosureFunctionDoesNotWriteToCapturedVariable(displayClassExecuteMethodAndItsLocalMethods);
-            
-            var (doesMakeStructuralChange, changeMethod, changeInstruction) = DoesClosureFunctionMakeStructuralChanges(displayClassExecuteMethodAndItsLocalMethods); 
+
+            var(doesMakeStructuralChange, changeMethod, changeInstruction) = DoesClosureFunctionMakeStructuralChanges(displayClassExecuteMethodAndItsLocalMethods);
             if (!LambdaJobDescriptionConstruction.WithStructuralChanges && doesMakeStructuralChange)
                 UserError.DC0027(changeMethod, changeInstruction).Throw();
-            
-            var (hasNestedLambdaJob, lambdaJobMethod, lambdaJobInstruction) = DoesClosureFunctionHaveNestedLambdaJob(displayClassExecuteMethodAndItsLocalMethods);
+
+            var(hasNestedLambdaJob, lambdaJobMethod, lambdaJobInstruction) = DoesClosureFunctionHaveNestedLambdaJob(displayClassExecuteMethodAndItsLocalMethods);
             if (hasNestedLambdaJob)
                 UserError.DC0029(lambdaJobMethod, lambdaJobInstruction).Throw();
 
-            (ClonedMethods, CapturedVariables) = CecilHelpers.CloneClosureExecuteMethodAndItsLocalFunctions(displayClassExecuteMethodAndItsLocalMethods, TypeDefinition, "OriginalLambdaBody");
+            IEnumerable<Instruction> PermittedCapturingInstructionsGenerator(IEnumerable<MethodDefinition> methodsToClone)
+            {
+                var instructionsThatPushThisForPermittedMethodCall = new List<Instruction>();
+                foreach (var method in methodsToClone)
+                {
+                    instructionsThatPushThisForPermittedMethodCall.AddRange(
+                        method.Body.Instructions.Where(i => i.IsInvocation(out var methodReference) && IsPermittedMethodToInvokeWithThis(methodReference))
+                            .Select(i => CecilHelpers.FindInstructionThatPushedArg(method, 0, i)));
+                }
+
+                return instructionsThatPushThisForPermittedMethodCall;
+            }
+
+            (ClonedMethods, CapturedVariables) =
+                CecilHelpers.CloneClosureExecuteMethodAndItsLocalFunctions(displayClassExecuteMethodAndItsLocalMethods, TypeDefinition, "OriginalLambdaBody",
+                    PermittedCapturingInstructionsGenerator);
+
+            // Stub out original cloned method to just throw an exception if run.  We do this for two reasons:
+            // 1. We might need to do patching that might make the original method IL invalid.
+            // 2. Ensure that this method is not called from anywhere.
+            foreach (var method in displayClassExecuteMethodAndItsLocalMethods)
+                PatchMethodToThrowInvalidMethodCalledException(method);
+
+            _componentAccessPatcher.PatchComponentAccessInstructions(ClonedMethods);
 
             if (LambdaJobDescriptionConstruction.DelegateProducingSequence.CapturesLocals)
             {
-                ReadFromDisplayClassMethod = AddMethodToTransferFieldsWithDisplayClass("ReadFromDisplayClass",TransferDirection.DisplayClassToJob);
+                ReadFromDisplayClassMethod = AddMethodToTransferFieldsWithDisplayClass("ReadFromDisplayClass", TransferDirection.DisplayClassToJob);
                 if (LambdaJobDescriptionConstruction.ExecutionMode == ExecutionMode.Run)
                     WriteToDisplayClassMethod = AddMethodToTransferFieldsWithDisplayClass("WriteToDisplayClass", TransferDirection.JobToDisplayClass);
             }
 
-            // Kept around for reference when implementing IJobChunk ForEach 
+            // Kept around for reference when implementing IJobChunk ForEach
             //ApplyPostProcessingOnJobCode(clonedMethods, providerInformations);
 
             VerifyDisplayClassFieldsAreValid();
         }
 
-        private void MakeOriginalLambdaMethodThatRelaysToInstanceMethodOnComponentSystem()
+        void PatchMethodToThrowInvalidMethodCalledException(MethodDefinition method)
+        {
+            method.Body.Instructions.Clear();
+            var invalidMethodCalledExceptionMethod = TypeDefinition.Module.ImportReference(
+                typeof(LambdaForEachDescriptionConstructionMethods).GetMethod(
+                    nameof(LambdaForEachDescriptionConstructionMethods.ThrowCodeGenInvalidMethodCalledException), BindingFlags.Public | BindingFlags.Static));
+            method.Body.Instructions.Add(Instruction.Create(OpCodes.Call, invalidMethodCalledExceptionMethod));
+            method.Body.Instructions.Add(Instruction.Create(OpCodes.Ret));
+        }
+
+        void MakeOriginalLambdaMethodThatRelaysToInstanceMethodOnComponentSystem()
         {
             SystemInstanceField = new FieldDefinition("hostInstance", FieldAttributes.Public,
                 LambdaJobDescriptionConstruction.ContainingMethod.DeclaringType);
@@ -396,11 +446,11 @@ namespace Unity.Entities.CodeGen
             ClonedMethods = new[] {fakeClonedLambdaBody};
         }
 
-        private void VerifyDisplayClassFieldsAreValid()
+        void VerifyDisplayClassFieldsAreValid()
         {
             if (LambdaJobDescriptionConstruction.AllowReferenceTypes)
                 return;
-            
+
             foreach (var capturedVariable in CapturedVariables.Values)
             {
                 var typeDefinition = capturedVariable.NewField.FieldType.Resolve();
@@ -427,21 +477,23 @@ namespace Unity.Entities.CodeGen
                     foreach (var clonedMethod in ClonedMethods)
                     {
                         var methodInvocations = clonedMethod.Body.Instructions.Where(i => i.Operand is MethodReference mr && mr.HasThis);
-                        foreach(var methodInvocation in methodInvocations)
+                        foreach (var methodInvocation in methodInvocations)
                         {
                             var pushThisInstruction = CecilHelpers.FindInstructionThatPushedArg(clonedMethod, 0, methodInvocation);
                             if (pushThisInstruction == null)
                                 continue;
                             if (pushThisInstruction.Operand is FieldReference fr && fr.FieldType.TypeReferenceEquals(typeDefinition))
-                                UserError.DC0002(clonedMethod, methodInvocation, (MethodReference) methodInvocation.Operand).Throw();
+                            {
+                                var method = (MethodReference)methodInvocation.Operand;
+                                UserError.DC0002(clonedMethod, methodInvocation, method, method.DeclaringType).Throw();
+                            }
                         }
                     }
 
-                    UserError.DC0004(LambdaJobDescriptionConstruction.ContainingMethod,LambdaJobDescriptionConstruction.WithCodeInvocationInstruction, capturedVariable.NewField.Resolve()).Throw();
+                    UserError.DC0004(LambdaJobDescriptionConstruction.ContainingMethod, LambdaJobDescriptionConstruction.WithCodeInvocationInstruction, capturedVariable.NewField.Resolve()).Throw();
                 }
             }
         }
-        
 
         static bool IsChunkEntitiesForEachInvocation(Instruction instruction)
         {
@@ -478,12 +530,12 @@ namespace Unity.Entities.CodeGen
             }
 
             int counter = 1;
-            foreach (var (methodUsedByLambdaJob, instruction) in forEachInvocations)
+            foreach (var(methodUsedByLambdaJob, instruction) in forEachInvocations)
             {
                 var methodBody = methodUsedByLambdaJob.Body;
-                var (ldFtn, newObj) = FindClosureCreatingInstructions(methodBody, instruction);
+                var(ldFtn, newObj) = FindClosureCreatingInstructions(methodBody, instruction);
 
-                var newType = new TypeDefinition("", "InlineEntitiesForEachInvocation" + counter++, TypeAttributes.NestedPublic | TypeAttributes.SequentialLayout,methodUsedByLambdaJob.Module.ImportReference(typeof(ValueType)))
+                var newType = new TypeDefinition("", "InlineEntitiesForEachInvocation" + counter++, TypeAttributes.NestedPublic | TypeAttributes.SequentialLayout | TypeAttributes.Sealed, methodUsedByLambdaJob.Module.ImportReference(typeof(ValueType)))
                 {
                     DeclaringType = methodUsedByLambdaJob.DeclaringType
                 };
@@ -495,6 +547,7 @@ namespace Unity.Entities.CodeGen
 
                 var variable = new VariableDefinition(newType);
                 methodBody.Variables.Add(variable);
+                methodBody.InitLocals = true; // initlocals must be set for verifiable methods with one or more local variables
 
                 InstructionExtensions.MakeNOP(ldFtn.Previous);
                 InstructionExtensions.MakeNOP(ldFtn);
@@ -520,15 +573,15 @@ namespace Unity.Entities.CodeGen
                     Instruction.Create(OpCodes.Call, ReadFromDisplayClassMethod),
 
                     Instruction.Create(OpCodes.Ldloca, variable),
-                    Instruction.Create(OpCodes.Ldarga, methodBody.Method.Parameters.First(p=>p.ParameterType.Name == nameof(ArchetypeChunk))),
+                    Instruction.Create(OpCodes.Ldarga, methodBody.Method.Parameters.First(p => p.ParameterType.Name == nameof(ArchetypeChunk))),
                     Instruction.Create(OpCodes.Ldarg_0),
                     Instruction.Create(OpCodes.Ldfld, lambdaParameterValueInformations._runtimesField),
-                    Instruction.Create(OpCodes.Call, (MethodReference) iterateEntitiesMethod),
+                    Instruction.Create(OpCodes.Call, (MethodReference)iterateEntitiesMethod),
                 });
 
 #if ENABLE_DOTS_COMPILER_CHUNKS
                 var chunkEntitiesInvocation = LambdaJobDescriptionConstruction.FindInstructionThatPushedArg(methodBody.Method, 0, instruction);
-                if (chunkEntitiesInvocation.Operand is MethodReference mr && mr.Name == "get_"+nameof(ArchetypeChunk.Entities) && mr.DeclaringType.Name == nameof(ArchetypeChunk))
+                if (chunkEntitiesInvocation.Operand is MethodReference mr && mr.Name == "get_" + nameof(ArchetypeChunk.Entities) && mr.DeclaringType.Name == nameof(ArchetypeChunk))
                     CecilHelpers.EraseMethodInvocationFromInstructions(ilProcessor, chunkEntitiesInvocation);
 #endif
 
@@ -536,17 +589,17 @@ namespace Unity.Entities.CodeGen
             }
         }
 
-        private MethodDefinition MakeScheduleTimeInitializeMethod(LambdaParameterValueInformations lambdaParameterValueInformations)
+        MethodDefinition MakeScheduleTimeInitializeMethod(LambdaParameterValueInformations lambdaParameterValueInformations)
         {
             var scheduleTimeInitializeMethod =
                 new MethodDefinition("ScheduleTimeInitialize", MethodAttributes.Public, TypeDefinition.Module.TypeSystem.Void)
+            {
+                HasThis = true,
+                Parameters =
                 {
-                    HasThis = true,
-                    Parameters =
-                    {
-                        new ParameterDefinition("componentSystem", ParameterAttributes.None,LambdaJobDescriptionConstruction.ContainingMethod.DeclaringType),
-                    },
-                };
+                    new ParameterDefinition("componentSystem", ParameterAttributes.None, LambdaJobDescriptionConstruction.ContainingMethod.DeclaringType),
+                },
+            };
 
             if (ReadFromDisplayClassMethod != null)
                 scheduleTimeInitializeMethod.Parameters.Add(ReadFromDisplayClassMethod.Parameters.Last());
@@ -569,16 +622,18 @@ namespace Unity.Entities.CodeGen
                 scheduleIL.Emit(OpCodes.Ldarg_1);
                 scheduleIL.Emit(OpCodes.Stfld, SystemInstanceField);
             }
-            
+
+            _componentAccessPatcher.EmitScheduleInitializeOnLoadCode(scheduleIL);
+
             scheduleIL.Emit(OpCodes.Ret);
             return scheduleTimeInitializeMethod;
         }
 
-        private  MethodDefinition MakeExecuteMethod_Job()
+        MethodDefinition MakeExecuteMethod_Job()
         {
-            var executeMethod = CecilHelpers.AddMethodImplementingInterfaceMethod(TypeDefinition.Module, 
+            var executeMethod = CecilHelpers.AddMethodImplementingInterfaceMethod(TypeDefinition.Module,
                 TypeDefinition, typeof(IJob).GetMethod(nameof(IJob.Execute)));
-            
+
             var executeIL = executeMethod.Body.GetILProcessor();
             executeIL.Emit(OpCodes.Ldarg_0);
             executeIL.Emit(OpCodes.Call, ClonedLambdaBody);
@@ -587,9 +642,9 @@ namespace Unity.Entities.CodeGen
             return executeMethod;
         }
 
-        private MethodDefinition MakeExecuteMethod_Chunk(LambdaParameterValueInformations lambdaParameterValueInformations)
+        MethodDefinition MakeExecuteMethod_Chunk(LambdaParameterValueInformations lambdaParameterValueInformations)
         {
-            var executeMethod = CecilHelpers.AddMethodImplementingInterfaceMethod(TypeDefinition.Module, 
+            var executeMethod = CecilHelpers.AddMethodImplementingInterfaceMethod(TypeDefinition.Module,
                 TypeDefinition, typeof(IJobChunk).GetMethod(nameof(IJobChunk.Execute)));
 
             lambdaParameterValueInformations.EmitInvocationToPrepareToRunOnEntitiesInIntoJobChunkExecute(executeMethod);
@@ -606,9 +661,9 @@ namespace Unity.Entities.CodeGen
             return executeMethod;
         }
 
-        private MethodDefinition MakeExecuteMethod_Entities(LambdaParameterValueInformations providerInformations)
+        MethodDefinition MakeExecuteMethod_Entities(LambdaParameterValueInformations providerInformations)
         {
-            var executeMethod = CecilHelpers.AddMethodImplementingInterfaceMethod(TypeDefinition.Module, 
+            var executeMethod = CecilHelpers.AddMethodImplementingInterfaceMethod(TypeDefinition.Module,
                 TypeDefinition, typeof(IJobChunk).GetMethod(nameof(IJobChunk.Execute)));
 
             providerInformations.EmitInvocationToPrepareToRunOnEntitiesInIntoJobChunkExecute(executeMethod);
@@ -618,21 +673,21 @@ namespace Unity.Entities.CodeGen
             var iterateOnEntitiesMethod = CreateIterateEntitiesMethod(providerInformations);
 
             ilProcessor.Emit(OpCodes.Ldarg_0);
-            ilProcessor.Emit(OpCodes.Ldarga,1);
+            ilProcessor.Emit(OpCodes.Ldarga, 1);
 
             ilProcessor.Emit(OpCodes.Ldarg_0);
-            ilProcessor.Emit(OpCodes.Ldfld,providerInformations._runtimesField);
+            ilProcessor.Emit(OpCodes.Ldfld, providerInformations._runtimesField);
 
             ilProcessor.Emit(OpCodes.Call, iterateOnEntitiesMethod);
 
             EmitCallToDeallocateOnCompletion(ilProcessor);
-            
+
             ilProcessor.Emit(OpCodes.Ret);
 
             return executeMethod;
         }
-        
-        private MethodDefinition MakeExecuteMethod_EntitiesWithStructuralChanges(LambdaParameterValueInformations providerInformations)
+
+        MethodDefinition MakeExecuteMethod_EntitiesWithStructuralChanges(LambdaParameterValueInformations providerInformations)
         {
             var executeMethod = new MethodDefinition("Execute", MethodAttributes.Public, TypeDefinition.Module.TypeSystem.Void)
             {
@@ -647,15 +702,15 @@ namespace Unity.Entities.CodeGen
             var runtimesVariable = providerInformations.EmitInvocationToPrepareToRunOnEntitiesInIntoJobChunkExecute(executeMethod);
 
             var ilProcessor = executeMethod.Body.GetILProcessor();
-            
+
             ilProcessor.Emit(OpCodes.Ldloca, runtimesVariable);
             ilProcessor.Emit(OpCodes.Ldflda, providerInformations._entityProviderField);
-            
+
             ilProcessor.Emit(OpCodes.Ldarg_0);
-            
+
             ilProcessor.Emit(OpCodes.Ldarg_0);
             ilProcessor.Emit(OpCodes.Ldfld, providerInformations._runtimesField);
-            
+
             ilProcessor.Emit(OpCodes.Ldsfld, PerformLambdaDelegateField);
 
             ilProcessor.Emit(OpCodes.Call, ImportReference(typeof(StructuralChangeEntityProvider).GetMethod(nameof(StructuralChangeEntityProvider.IterateEntities))));
@@ -665,7 +720,7 @@ namespace Unity.Entities.CodeGen
             return executeMethod;
         }
 
-        private void EmitCallToDeallocateOnCompletion(ILProcessor ilProcessor)
+        void EmitCallToDeallocateOnCompletion(ILProcessor ilProcessor)
         {
             if (DeallocateOnCompletionMethod == null)
                 return;
@@ -675,7 +730,7 @@ namespace Unity.Entities.CodeGen
 
         private MethodDefinition CreateIterateEntitiesMethod(LambdaParameterValueInformations lambdaParameterValueInformations)
         {
-            var iterateEntitiesMethod = new MethodDefinition("IterateEntities", MethodAttributes.Public,TypeSystem.Void)
+            var iterateEntitiesMethod = new MethodDefinition("IterateEntities", MethodAttributes.Public, TypeSystem.Void)
             {
                 Parameters =
                 {
@@ -688,20 +743,21 @@ namespace Unity.Entities.CodeGen
                 // Needed as there is an issue with LLVM version < 10.0 not applying optimizations correctly if the method is inlined.
                 // This should be fixed in LLVM 10+ and this can be removed once Burst relies on that version.
                 iterateEntitiesMethod.NoInlining = true;
-                
+
                 var burstNoAliasAttributeConstructor = TypeDefinition.Module.ImportReference(
-                    typeof(NoAliasAttribute).GetConstructors().Single(c=>!c.GetParameters().Any()));
+                    typeof(NoAliasAttribute).GetConstructors().Single(c => !c.GetParameters().Any()));
                 iterateEntitiesMethod.Parameters[1].CustomAttributes.Add(new CustomAttribute(burstNoAliasAttributeConstructor));
             }
 
             TypeDefinition.Methods.Add(iterateEntitiesMethod);
 
             var ilProcessor = iterateEntitiesMethod.Body.GetILProcessor();
+            iterateEntitiesMethod.Body.InitLocals = true; // initlocals must be set for verifiable methods with one or more local variables
 
             var loopTerminator = new VariableDefinition(TypeSystem.Int32);
             iterateEntitiesMethod.Body.Variables.Add(loopTerminator);
             ilProcessor.Emit(OpCodes.Ldarg_1);
-            ilProcessor.Emit(OpCodes.Call, ImportReference(typeof(ArchetypeChunk).GetMethod("get_"+nameof(ArchetypeChunk.Count))));
+            ilProcessor.Emit(OpCodes.Call, ImportReference(typeof(ArchetypeChunk).GetMethod("get_" + nameof(ArchetypeChunk.Count))));
             ilProcessor.Emit(OpCodes.Stloc, loopTerminator);
 
             var loopCounter = new VariableDefinition(TypeSystem.Int32);
@@ -712,10 +768,19 @@ namespace Unity.Entities.CodeGen
             var beginLoopInstruction = Instruction.Create(OpCodes.Ldloc, loopCounter);
             ilProcessor.Append(beginLoopInstruction);
             ilProcessor.Emit(OpCodes.Ldloc, loopTerminator);
-            ilProcessor.Emit(OpCodes.Ceq);
+
+            // We use compare less than here so that the loop check is:
+            // for (int i = 0; i < count; i++) { /* ... */ }
+            // This is important because in C# integers have a defined wrapping behaviour on integer overflow - EG. if the integer
+            // is int.MaxValue and you add one to it, it becomes int.MinValue. This means that if you used i != count for the loop
+            // end condition, the compiler has to assume that count could have been negative and you are intending to increment
+            // the entire integer range and wrap around to negative before doing the check. By using i < count you have
+            // effectively told the compiler that within the for loop i can only ever be a positive integer [0..count), and this
+            // allows the compiler to output less instructions for the loops counts as a result.
+            ilProcessor.Emit(OpCodes.Clt);
 
             var exitDestination = Instruction.Create(OpCodes.Nop);
-            ilProcessor.Emit(OpCodes.Brtrue, exitDestination);
+            ilProcessor.Emit(OpCodes.Brfalse, exitDestination);
 
             ilProcessor.Emit(OpCodes.Ldarg_0);
             foreach (var parameterDefinition in ClonedLambdaBody.Parameters)
@@ -733,7 +798,7 @@ namespace Unity.Entities.CodeGen
             ilProcessor.Emit(OpCodes.Ret);
             return iterateEntitiesMethod;
         }
-        
+
         MethodDefinition CreateStructuralChangesPerformLambdaMethod(LambdaParameterValueInformations lambdaParameterValueInformations)
         {
             var performLambdaMethod = new MethodDefinition("PerformLambda", MethodAttributes.Public | MethodAttributes.Static, TypeSystem.Void)
@@ -745,9 +810,10 @@ namespace Unity.Entities.CodeGen
                     new ParameterDefinition("entity", ParameterAttributes.None, ImportReference(typeof(Entity)))
                 }
             };
-            
+
             TypeDefinition.Methods.Add(performLambdaMethod);
             var ilProcessor = performLambdaMethod.Body.GetILProcessor();
+            performLambdaMethod.Body.InitLocals = true; // initlocals must be set for verifiable methods with one or more local variables
 
             void CastPerformLambdaParameterToTypeAndLeaveOnStack(TypeReference castToType, int performLambdaParameterParameterIdx)
             {
@@ -770,8 +836,8 @@ namespace Unity.Entities.CodeGen
             for (var iParameter = 0; iParameter < ClonedLambdaBody.Parameters.Count; iParameter++)
             {
                 var parameterDefinition = ClonedLambdaBody.Parameters[iParameter];
-                
-                var (parameterVariable, addressVariable) =
+
+                var(parameterVariable, addressVariable) =
                     lambdaParameterValueInformations.EmitILToCreateCopyForParameter_WithStructuralChanges(runtimesVariable, parameterDefinition, ilProcessor);
                 parameterCopyVariables.Add(parameterVariable);
                 if (addressVariable != null)
@@ -797,7 +863,7 @@ namespace Unity.Entities.CodeGen
                 var parameterDefinition = ClonedLambdaBody.Parameters[iParameter];
 
                 lambdaParameterValueInformations.EmitILToWriteBackParameter_WithStructuralChanges(
-                    runtimesVariable, parameterDefinition, ilProcessor, parameterCopyVariables[iParameter], 
+                    runtimesVariable, parameterDefinition, ilProcessor, parameterCopyVariables[iParameter],
                     parameterVariableAddresses.ContainsKey(parameterCopyVariables[iParameter]) ? parameterVariableAddresses[parameterCopyVariables[iParameter]] : null);
             }
 
@@ -805,13 +871,20 @@ namespace Unity.Entities.CodeGen
             return performLambdaMethod;
         }
 
-        private void ApplyBurstAttributeIfRequired()
+        void ApplyBurstAttributeIfRequired()
         {
             if (!LambdaJobDescriptionConstruction.UsesBurst)
                 return;
-            
+
             var module = TypeDefinition.Module;
             var burstCompileAttributeConstructor = AttributeConstructorReferenceFor(typeof(BurstCompileAttribute), module);
+            var burstCompileAttribute = new CustomAttribute(burstCompileAttributeConstructor);
+            var useBurstMethod = LambdaJobDescriptionConstruction.InvokedConstructionMethods.FirstOrDefault(m => m.MethodName == nameof(LambdaJobDescriptionConstructionMethods.WithBurst));
+
+            // Adding MonoPInvokeCallbackAttribute needed for IL2CPP to work when burst is disabled
+            var monoPInvokeCallbackAttributeConstructors = typeof(MonoPInvokeCallbackAttribute).GetConstructors(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            var monoPInvokeCallbackAttribute = new CustomAttribute(module.ImportReference(monoPInvokeCallbackAttributeConstructors[0]));
+            monoPInvokeCallbackAttribute.ConstructorArguments.Add(new CustomAttributeArgument(ImportReference(typeof(Type)), ImportReference(ExecuteDelegateType)));
 
             CustomAttributeNamedArgument CustomAttributeNamedArgumentFor(string name, Type type, object value)
             {
@@ -819,39 +892,37 @@ namespace Unity.Entities.CodeGen
                     new CustomAttributeArgument(module.ImportReference(type), value));
             }
 
-            var burstCompileAttribute = new CustomAttribute(burstCompileAttributeConstructor);
-
-            var useBurstMethod = LambdaJobDescriptionConstruction.InvokedConstructionMethods.FirstOrDefault(m=>m.MethodName == nameof(LambdaJobDescriptionConstructionMethods.WithBurst));
-
             if (useBurstMethod != null && useBurstMethod.Arguments.Length == 3)
             {
-                burstCompileAttribute.Properties.Add(CustomAttributeNamedArgumentFor(nameof(BurstCompileAttribute.FloatMode),typeof(FloatMode), useBurstMethod.Arguments[0]));
-                burstCompileAttribute.Properties.Add(CustomAttributeNamedArgumentFor(nameof(BurstCompileAttribute.FloatPrecision),typeof(FloatPrecision), useBurstMethod.Arguments[1]));
-                burstCompileAttribute.Properties.Add(CustomAttributeNamedArgumentFor(nameof(BurstCompileAttribute.CompileSynchronously),typeof(bool), useBurstMethod.Arguments[2]));
+                burstCompileAttribute.Properties.Add(CustomAttributeNamedArgumentFor(nameof(BurstCompileAttribute.FloatMode), typeof(FloatMode), useBurstMethod.Arguments[0]));
+                burstCompileAttribute.Properties.Add(CustomAttributeNamedArgumentFor(nameof(BurstCompileAttribute.FloatPrecision), typeof(FloatPrecision), useBurstMethod.Arguments[1]));
+                burstCompileAttribute.Properties.Add(CustomAttributeNamedArgumentFor(nameof(BurstCompileAttribute.CompileSynchronously), typeof(bool), useBurstMethod.Arguments[2]));
             }
 
             TypeDefinition.CustomAttributes.Add(burstCompileAttribute);
             RunWithoutJobSystemMethod?.CustomAttributes.Add(burstCompileAttribute);
-            
+#if !UNITY_DOTSPLAYER
+            RunWithoutJobSystemMethod?.CustomAttributes.Add(monoPInvokeCallbackAttribute);
+#endif
+
             // Need to make sure Burst knows the jobs struct doesn't alias with any pointer fields.
             if (LambdaJobDescriptionConstruction.UsesNoAlias)
             {
                 var burstNoAliasAttribute = new CustomAttribute(TypeDefinition.Module.ImportReference(
-                    typeof(NoAliasAttribute).GetConstructors().Single(c=>!c.GetParameters().Any())));
+                    typeof(NoAliasAttribute).GetConstructors().Single(c => !c.GetParameters().Any())));
                 TypeDefinition.CustomAttributes.Add(burstNoAliasAttribute);
             }
         }
 
-
-        private MethodDefinition AddMethodToTransferFieldsWithDisplayClass(string methodName, TransferDirection direction)
+        MethodDefinition AddMethodToTransferFieldsWithDisplayClass(string methodName, TransferDirection direction)
         {
-            var method =new MethodDefinition(methodName, MethodAttributes.Public | MethodAttributes.Virtual | MethodAttributes.Final | MethodAttributes.NewSlot, TypeDefinition.Module.TypeSystem.Void);
+            var method = new MethodDefinition(methodName, MethodAttributes.Public | MethodAttributes.Virtual | MethodAttributes.Final | MethodAttributes.NewSlot, TypeDefinition.Module.TypeSystem.Void);
 
             var displayClassTypeReference = LambdaJobDescriptionConstruction.DisplayClass;
             var parameterType = displayClassTypeReference.IsValueType()
                 ? new ByReferenceType(displayClassTypeReference)
                 : (TypeReference)displayClassTypeReference;
-            method.Parameters.Add(new ParameterDefinition("displayClass", ParameterAttributes.None,parameterType));
+            method.Parameters.Add(new ParameterDefinition("displayClass", ParameterAttributes.None, parameterType));
 
             var ilProcessor = method.Body.GetILProcessor();
             foreach (var capturedVariable in CapturedVariables.Values)
@@ -898,7 +969,7 @@ namespace Unity.Entities.CodeGen
             }
 
             InternalCompilerError.DCICE002(body.Method, callInstruction).Throw();
-            return (null,null);
+            return (null, null);
         }
 
         private enum TransferDirection
@@ -909,7 +980,7 @@ namespace Unity.Entities.CodeGen
 
         public static MethodReference AttributeConstructorReferenceFor(Type attributeType, ModuleDefinition module)
         {
-            return module.ImportReference(attributeType.GetConstructors().Single(c=>!c.GetParameters().Any()));
+            return module.ImportReference(attributeType.GetConstructors().Single(c => !c.GetParameters().Any()));
         }
 
         private static void VerifyClosureFunctionDoesNotWriteToCapturedVariable(IEnumerable<MethodDefinition> methods)
@@ -922,17 +993,17 @@ namespace Unity.Entities.CodeGen
                 {
                     if (i.OpCode != OpCodes.Stfld)
                         return false;
-                    return ((FieldReference) i.Operand).DeclaringType.FullName == typeDefinitionFullName;
+                    return ((FieldReference)i.Operand).DeclaringType.FullName == typeDefinitionFullName;
                 });
 
                 var first = badInstructions.FirstOrDefault();
                 if (first == null)
                     continue;
 
-                UserError.DC0013(((FieldReference) first.Operand), method, first).Throw();
+                UserError.DC0013(((FieldReference)first.Operand), method, first).Throw();
             }
         }
-        
+
         static (bool, MethodDefinition, Instruction) DoesClosureFunctionMakeStructuralChanges(IEnumerable<MethodDefinition> methods)
         {
             foreach (var method in methods)
@@ -941,14 +1012,14 @@ namespace Unity.Entities.CodeGen
                 {
                     if (i.OpCode == OpCodes.Call || i.OpCode == OpCodes.Callvirt)
                     {
-                        var methodReference = ((MethodReference) i.Operand);
+                        var methodReference = ((MethodReference)i.Operand);
                         if (methodReference.DeclaringType.Name != nameof(EntityManager))
                             return false;
-                        
+
                         var methodDefinition = methodReference.Resolve();
                         if (methodDefinition.HasCustomAttributes &&
                             methodDefinition.CustomAttributes.Any(c => c.AttributeType.Name == "StructuralChangeMethodAttribute"))
-                        return true;
+                            return true;
                     }
 
                     return false;
@@ -957,10 +1028,10 @@ namespace Unity.Entities.CodeGen
                 if (badInstructions.Any())
                     return (true, method, badInstructions.FirstOrDefault());
             }
-            
+
             return (false, default, default);
         }
-        
+
         static (bool, MethodDefinition, Instruction) DoesClosureFunctionHaveNestedLambdaJob(IEnumerable<MethodDefinition> methods)
         {
             foreach (var method in methods)
@@ -970,7 +1041,7 @@ namespace Unity.Entities.CodeGen
                 if (lambdaJobStatementStartingInstructions.Any())
                     return (true, method, lambdaJobStatementStartingInstructions.FirstOrDefault());
             }
-            
+
             return (false, default, default);
         }
     }

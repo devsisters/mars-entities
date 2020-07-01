@@ -1,7 +1,9 @@
-﻿using System;
+using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using Unity.Assertions;
 using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
 using Unity.Entities;
@@ -10,7 +12,6 @@ using Unity.IO.LowLevel.Unsafe;
 using Unity.Jobs;
 using Unity.Profiling;
 using UnityEngine;
-
 
 namespace Unity.Scenes
 {
@@ -21,8 +22,10 @@ namespace Unity.Scenes
         public int SceneSize;
         public string ResourcesPathObjRefs;
         public string ScenePath;
-        public bool UsingBundles;
         public bool BlockUntilFullyLoaded;
+#if !UNITY_DISABLE_MANAGED_COMPONENTS
+        public PostLoadCommandBuffer PostLoadCommandBuffer;
+#endif
     }
 
     unsafe class AsyncLoadSceneOperation
@@ -69,8 +72,11 @@ namespace Unity.Scenes
                 _EntityManager.ExclusiveEntityTransactionDependency.Complete();
                 new FreeJob { ptr = _FileContent, allocator = Allocator.Persistent }.Schedule();
             }
-            if (_AssetBundle)
-                _AssetBundle.Unload(true);
+
+            _SceneBundleHandle?.Release();
+#if !UNITY_DISABLE_MANAGED_COMPONENTS
+            _Data.PostLoadCommandBuffer?.Dispose();
+#endif
         }
 
         struct AsyncLoadSceneJob : IJob
@@ -112,14 +118,12 @@ namespace Unity.Scenes
         int                     _SceneSize => _Data.SceneSize;
         int                     _ExpectedObjectReferenceCount => _Data.ExpectedObjectReferenceCount;
         string                  _ResourcesPathObjRefs => _Data.ResourcesPathObjRefs;
-        EntityManager           _EntityManager => _Data.EntityManager;
-        bool                    _UsingBundles => _Data.UsingBundles;
+        ref EntityManager           _EntityManager => ref _Data.EntityManager;
         bool                    _BlockUntilFullyLoaded => _Data.BlockUntilFullyLoaded;
 
         ReferencedUnityObjects  _ResourceObjRefs;
 
-        AssetBundleCreateRequest _AssetBundleRequest;
-        AssetBundle             _AssetBundle;
+        SceneBundleHandle       _SceneBundleHandle;
         AssetBundleRequest      _AssetRequest;
 
         LoadingStatus           _LoadingStatus;
@@ -129,30 +133,11 @@ namespace Unity.Scenes
         ReadHandle               _ReadHandle;
 
         private double _StartTime;
-
-        public AsyncLoadSceneOperation(AsyncLoadSceneData asyncLoadSceneData, bool usingLiveLink)
+        
+        public AsyncLoadSceneOperation(AsyncLoadSceneData asyncLoadSceneData)
         {
             _Data = asyncLoadSceneData;
             _LoadingStatus = LoadingStatus.NotStarted;
-
-            if (usingLiveLink && _ExpectedObjectReferenceCount != 0)
-            {
-                // Resolving must happen on the main thread
-                using(var data = new NativeArray<byte>(File.ReadAllBytes(_ResourcesPathObjRefs), Allocator.Temp))
-                using (var reader = new MemoryBinaryReader((byte*)data.GetUnsafePtr()))
-                {
-                    var numObjRefGUIDs = reader.ReadInt();
-                    NativeArray<RuntimeGlobalObjectId> objRefGUIDs = new NativeArray<RuntimeGlobalObjectId>(numObjRefGUIDs, Allocator.Temp);
-                    reader.ReadArray(objRefGUIDs, numObjRefGUIDs);
-
-                    var objs = new UnityEngine.Object[numObjRefGUIDs];
-                    LiveLinkPlayerAssetRefreshSystem._GlobalAssetObjectResolver.ResolveObjects(objRefGUIDs, objs);
-                    objRefGUIDs.Dispose();
-
-                    _ResourceObjRefs = ScriptableObject.CreateInstance<ReferencedUnityObjects>();
-                    _ResourceObjRefs.Array = objs;
-                }
-            }
         }
 
         public bool IsCompleted
@@ -174,14 +159,62 @@ namespace Unity.Scenes
             }
         }
 
-        public AssetBundle StealBundle()
+        public SceneBundleHandle StealBundle()
         {
-            var bundle = _AssetBundle;
-            _AssetBundle = null;
-            return bundle;
+            SceneBundleHandle sceneBundleHandle = _SceneBundleHandle;
+            _SceneBundleHandle = null;
+            return sceneBundleHandle;
         }
 
-        public void Update()
+        private void UpdateBlocking()
+        {
+            if (_LoadingStatus == LoadingStatus.Completed)
+                return;
+            if (_SceneSize == 0)
+                return;
+
+            try
+            {
+                _StartTime = Time.realtimeSinceStartup;
+
+                _FileContent = (byte*)UnsafeUtility.Malloc(_SceneSize, 16, Allocator.Persistent);
+
+                ReadCommand cmd;
+                cmd.Buffer = _FileContent;
+                cmd.Offset = 0;
+                cmd.Size = _SceneSize;
+                Assert.IsFalse(string.IsNullOrEmpty(_ScenePath));
+#if ENABLE_PROFILER && UNITY_2020_2_OR_NEWER
+                // When AsyncReadManagerMetrics are available, mark up the file read for more informative IO metrics.
+                // Metrics can be retrieved by AsyncReadManagerMetrics.GetMetrics
+                _ReadHandle = AsyncReadManager.Read(_ScenePath, &cmd, 1, subsystem: AssetLoadingSubsystem.EntitiesScene);
+#else
+                _ReadHandle = AsyncReadManager.Read(_ScenePath, &cmd, 1);
+#endif
+
+                if (_ExpectedObjectReferenceCount != 0)
+                {
+#if UNITY_EDITOR
+                    var resourceRequests = UnityEditorInternal.InternalEditorUtility.LoadSerializedFileAndForget(_ResourcesPathObjRefs);
+                    _ResourceObjRefs = (ReferencedUnityObjects)resourceRequests[0];
+#else
+                    _SceneBundleHandle = SceneBundleHandle.CreateOrRetainBundle(_ResourcesPathObjRefs);
+                    _ResourceObjRefs = _SceneBundleHandle.AssetBundle.LoadAsset<ReferencedUnityObjects>(Path.GetFileName(_ResourcesPathObjRefs));
+#endif
+                }
+                
+                ScheduleSceneRead(_ResourceObjRefs);
+                _EntityManager.EndExclusiveEntityTransaction();
+                PostProcessScene();
+            }
+            catch (Exception e)
+            {
+                _LoadingFailure = e.Message;
+            }
+            _LoadingStatus = LoadingStatus.Completed;
+        }
+
+        private void UpdateAsync()
         {
             //@TODO: Try to overlap Resources load and entities scene load
 
@@ -201,36 +234,26 @@ namespace Unity.Scenes
                     cmd.Buffer = _FileContent;
                     cmd.Offset = 0;
                     cmd.Size = _SceneSize;
+                    Assert.IsFalse(string.IsNullOrEmpty(_ScenePath));
+#if ENABLE_PROFILER && UNITY_2020_2_OR_NEWER
+                    // When AsyncReadManagerMetrics are available, mark up the file read for more informative IO metrics.
+                    // Metrics can be retrieved by AsyncReadManagerMetrics.GetMetrics
+                    _ReadHandle = AsyncReadManager.Read(_ScenePath, &cmd, 1, subsystem: AssetLoadingSubsystem.EntitiesScene);
+#else
                     _ReadHandle = AsyncReadManager.Read(_ScenePath, &cmd, 1);
+#endif
 
                     if (_ExpectedObjectReferenceCount != 0)
                     {
 #if UNITY_EDITOR
-                        if (!_UsingBundles)
-                        {
-                            var resourceRequests = UnityEditorInternal.InternalEditorUtility.LoadSerializedFileAndForget(_ResourcesPathObjRefs);
-                            _ResourceObjRefs = (ReferencedUnityObjects)resourceRequests[0];
+                        var resourceRequests = UnityEditorInternal.InternalEditorUtility.LoadSerializedFileAndForget(_ResourcesPathObjRefs);
+                        _ResourceObjRefs = (ReferencedUnityObjects)resourceRequests[0];
 
-                            _LoadingStatus = LoadingStatus.WaitingForResourcesLoad;
-                        }
-                        else
+                        _LoadingStatus = LoadingStatus.WaitingForResourcesLoad;
+#else
+                        _SceneBundleHandle = SceneBundleHandle.CreateOrRetainBundle(_ResourcesPathObjRefs);
+                        _LoadingStatus = LoadingStatus.WaitingForAssetBundleLoad;
 #endif
-                        if (_ResourceObjRefs != null)
-                        {
-                            _LoadingStatus = LoadingStatus.WaitingForResourcesLoad;
-                        }
-                        else
-                        {
-                            if (!_BlockUntilFullyLoaded)
-                            {
-                                _AssetBundleRequest = AssetBundle.LoadFromFileAsync(_ResourcesPathObjRefs);
-                            }
-                            else
-                            {
-                                _AssetBundle = AssetBundle.LoadFromFile(_ResourcesPathObjRefs);
-                            }
-                            _LoadingStatus = LoadingStatus.WaitingForAssetBundleLoad;
-                        }
                     }
                     else
                     {
@@ -247,28 +270,20 @@ namespace Unity.Scenes
             // Once async asset bundle load is done, we can read the asset
             if (_LoadingStatus == LoadingStatus.WaitingForAssetBundleLoad)
             {
-                if (!_BlockUntilFullyLoaded)
+                if (!_SceneBundleHandle.IsReady())
+                    return;
+
+                if (!_SceneBundleHandle.AssetBundle)
                 {
-                    if (!_AssetBundleRequest.isDone)
-                        return;
-
-                    if (!_AssetBundleRequest.assetBundle)
-                    {
-                        _LoadingFailure = $"Failed to load Asset Bundle '{_ResourcesPathObjRefs}'";
-                        _LoadingStatus = LoadingStatus.Completed;
-                        return;
-                    }
-
-                    _AssetBundle = _AssetBundleRequest.assetBundle;
-
-                    _AssetRequest = _AssetBundle.LoadAssetAsync(Path.GetFileName(_ResourcesPathObjRefs));
-                    _LoadingStatus = LoadingStatus.WaitingForAssetLoad;
+                    _LoadingFailure = $"Failed to load Asset Bundle '{_ResourcesPathObjRefs}'";
+                    _LoadingStatus = LoadingStatus.Completed;
+                    return;
                 }
-                else
-                {
-                    _ResourceObjRefs = _AssetBundle.LoadAsset<ReferencedUnityObjects>(Path.GetFileName(_ResourcesPathObjRefs));
-                    _LoadingStatus = LoadingStatus.WaitingForEntitiesLoad;
-                }
+
+                var fileName = Path.GetFileName(_ResourcesPathObjRefs);
+                
+                _AssetRequest = _SceneBundleHandle.AssetBundle.LoadAssetAsync(fileName);
+                _LoadingStatus = LoadingStatus.WaitingForAssetLoad;
             }
 
             // Once async asset bundle load is done, we can read the asset
@@ -292,6 +307,7 @@ namespace Unity.Scenes
                     _LoadingStatus = LoadingStatus.Completed;
                     return;
                 }
+
                 _LoadingStatus = LoadingStatus.WaitingForEntitiesLoad;
             }
 
@@ -332,8 +348,8 @@ namespace Unity.Scenes
             {
                 if (_EntityManager.ExclusiveEntityTransactionDependency.IsCompleted)
                 {
-                    _EntityManager.ExclusiveEntityTransactionDependency.Complete();
-
+                    _EntityManager.EndExclusiveEntityTransaction();
+                    PostProcessScene();
                     _LoadingStatus = LoadingStatus.Completed;
                     var currentTime = Time.realtimeSinceStartup;
                     var totalTime = currentTime - _StartTime;
@@ -341,11 +357,23 @@ namespace Unity.Scenes
                 }
             }
         }
+        
+        public void Update()
+        {
+            if (_BlockUntilFullyLoaded)
+            {
+                UpdateBlocking();
+            }
+            else
+            {
+                UpdateAsync();
+            }
+        }
 
         void ScheduleSceneRead(ReferencedUnityObjects objRefs)
         {
             var transaction = _EntityManager.BeginExclusiveEntityTransaction();
-            SerializeUtilityHybrid.DeserializeObjectReferences(_EntityManager, objRefs, _ScenePath, out var objectReferences);
+            SerializeUtilityHybrid.DeserializeObjectReferences(objRefs, out var objectReferences);
 
             var loadJob = new AsyncLoadSceneJob
             {
@@ -357,6 +385,19 @@ namespace Unity.Scenes
 
             _EntityManager.ExclusiveEntityTransactionDependency = loadJob.Schedule(JobHandle.CombineDependencies(_EntityManager.ExclusiveEntityTransactionDependency, _ReadHandle.JobHandle));
         }
-    }
 
+        void PostProcessScene()
+        {
+#if !UNITY_DISABLE_MANAGED_COMPONENTS
+            if (_Data.PostLoadCommandBuffer != null)
+            {
+                _Data.PostLoadCommandBuffer.CommandBuffer.Playback(_EntityManager);
+                _Data.PostLoadCommandBuffer.Dispose();
+                _Data.PostLoadCommandBuffer = null;
+            }
+#endif
+            var group = _EntityManager.World.GetOrCreateSystem<ProcessAfterLoadGroup>();
+            group.Update();
+        }
+    }
 }

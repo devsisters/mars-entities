@@ -4,7 +4,7 @@ using Unity.Collections;
 
 namespace Unity.Entities
 {
-    public sealed unsafe partial class EntityManager
+    public unsafe partial struct EntityManager
     {
         // ----------------------------------------------------------------------------------------------------------
         // PUBLIC
@@ -26,9 +26,10 @@ namespace Unity.Entities
         public ArchetypeChunkComponentType<T> GetArchetypeChunkComponentType<T>(bool isReadOnly)
         {
 #if ENABLE_UNITY_COLLECTIONS_CHECKS
+            var access = GetCheckedEntityDataAccess();
             var typeIndex = TypeManager.GetTypeIndex<T>();
             return new ArchetypeChunkComponentType<T>(
-                SafetyHandles->GetSafetyHandle(typeIndex, isReadOnly), isReadOnly,
+                access->DependencyManager->Safety.GetSafetyHandleForArchetypeChunkComponentType(typeIndex, isReadOnly), isReadOnly,
                 GlobalSystemVersion);
 #else
             return new ArchetypeChunkComponentType<T>(isReadOnly, GlobalSystemVersion);
@@ -49,8 +50,9 @@ namespace Unity.Entities
         public ArchetypeChunkComponentTypeDynamic GetArchetypeChunkComponentTypeDynamic(ComponentType componentType)
         {
 #if ENABLE_UNITY_COLLECTIONS_CHECKS
+            var access = GetCheckedEntityDataAccess();
             return new ArchetypeChunkComponentTypeDynamic(componentType,
-                SafetyHandles->GetSafetyHandle(componentType.TypeIndex, componentType.AccessModeType == ComponentType.AccessMode.ReadOnly), 
+                access->DependencyManager->Safety.GetSafetyHandleForArchetypeChunkComponentTypeDynamic(componentType.TypeIndex, componentType.AccessModeType == ComponentType.AccessMode.ReadOnly),
                 GlobalSystemVersion);
 #else
             return new ArchetypeChunkComponentTypeDynamic(componentType, GlobalSystemVersion);
@@ -73,17 +75,9 @@ namespace Unity.Entities
         public ArchetypeChunkBufferType<T> GetArchetypeChunkBufferType<T>(bool isReadOnly)
             where T : struct, IBufferElementData
         {
-#if ENABLE_UNITY_COLLECTIONS_CHECKS
-            var typeIndex = TypeManager.GetTypeIndex<T>();
-            return new ArchetypeChunkBufferType<T>(
-                SafetyHandles->GetSafetyHandle(typeIndex, isReadOnly),
-                SafetyHandles->GetBufferSafetyHandle(typeIndex),
-                isReadOnly, GlobalSystemVersion);
-#else
-            return new ArchetypeChunkBufferType<T>(isReadOnly,GlobalSystemVersion);
-#endif
+            return GetCheckedEntityDataAccess()->GetArchetypeChunkBufferType<T>(isReadOnly);
         }
-        
+
         /// <summary>
         /// Gets the dynamic type object required to access a shared component of type T.
         /// </summary>
@@ -99,12 +93,14 @@ namespace Unity.Entities
             where T : struct, ISharedComponentData
         {
 #if ENABLE_UNITY_COLLECTIONS_CHECKS
-            return new ArchetypeChunkSharedComponentType<T>(SafetyHandles->GetEntityManagerSafetyHandle());
+            var typeIndex = TypeManager.GetTypeIndex<T>();
+            var access = GetCheckedEntityDataAccess();
+            return new ArchetypeChunkSharedComponentType<T>(access->DependencyManager->Safety.GetSafetyHandleForArchetypeChunkSharedComponentType(typeIndex));
 #else
             return new ArchetypeChunkSharedComponentType<T>(false);
 #endif
         }
-        
+
         /// <summary>
         /// Gets the dynamic type object required to access the <see cref="Entity"/> component of a chunk.
         /// </summary>
@@ -120,13 +116,14 @@ namespace Unity.Entities
         public ArchetypeChunkEntityType GetArchetypeChunkEntityType()
         {
 #if ENABLE_UNITY_COLLECTIONS_CHECKS
+            var access = GetCheckedEntityDataAccess();
             return new ArchetypeChunkEntityType(
-                SafetyHandles->GetSafetyHandle(TypeManager.GetTypeIndex<Entity>(), true));
+                access->DependencyManager->Safety.GetSafetyHandleForArchetypeChunkEntityType());
 #else
             return new ArchetypeChunkEntityType(false);
 #endif
         }
-        
+
         /// <summary>
         /// Gets an entity's component types.
         /// </summary>
@@ -136,11 +133,35 @@ namespace Unity.Entities
         /// <returns>An array of ComponentType containing all the types of components associated with the entity.</returns>
         public NativeArray<ComponentType> GetComponentTypes(Entity entity, Allocator allocator = Allocator.Temp)
         {
-            EntityComponentStore->AssertEntitiesExist(&entity, 1);
-            var archetype = new EntityArchetype { Archetype = EntityComponentStore->GetArchetype(entity) };
+            var access = GetCheckedEntityDataAccess();
+            var ecs = access->EntityComponentStore;
+
+            ecs->AssertEntitiesExist(&entity, 1);
+            var archetype = new EntityArchetype { Archetype = ecs->GetArchetype(entity) };
             return archetype.GetComponentTypes(allocator);
         }
-        
+
+        /// <summary>
+        /// Gets a list of the types of components that can be assigned to the specified component.
+        /// </summary>
+        /// <remarks>Assignable components include those with the same compile-time type and those that
+        /// inherit from the same compile-time type.</remarks>
+        /// <param name="interfaceType">The type to check.</param>
+        /// <param name="listOut">The list to receive the output.</param>
+        /// <returns>The list that was passed in, containing the System.Types that can be assigned to `interfaceType`.</returns>
+        public List<Type> GetAssignableComponentTypes(Type interfaceType, List<Type> listOut)
+        {
+            // #todo Cache this. It only can change when TypeManager.GetTypeCount() changes
+            var componentTypeCount = TypeManager.GetTypeCount();
+            for (var i = 0; i < componentTypeCount; i++)
+            {
+                var type = TypeManager.GetType(i);
+                if (interfaceType.IsAssignableFrom(type)) listOut.Add(type);
+            }
+
+            return listOut;
+        }
+
         /// <summary>
         /// Gets a list of the types of components that can be assigned to the specified component.
         /// </summary>
@@ -149,29 +170,21 @@ namespace Unity.Entities
         /// <param name="interfaceType">The type to check.</param>
         /// <returns>A new List object containing the System.Types that can be assigned to `interfaceType`.</returns>
         public List<Type> GetAssignableComponentTypes(Type interfaceType)
-        {
-            // #todo Cache this. It only can change when TypeManager.GetTypeCount() changes
-            var componentTypeCount = TypeManager.GetTypeCount();
-            var assignableTypes = new List<Type>();
-            for (var i = 0; i < componentTypeCount; i++)
-            {
-                var type = TypeManager.GetType(i);
-                if (interfaceType.IsAssignableFrom(type)) assignableTypes.Add(type);
-            }
-
-            return assignableTypes;
-        }
+            => GetAssignableComponentTypes(interfaceType, new List<Type>());
 
         // ----------------------------------------------------------------------------------------------------------
         // INTERNAL
         // ----------------------------------------------------------------------------------------------------------
-        
+
         internal int GetComponentTypeIndex(Entity entity, int index)
         {
-            EntityComponentStore->AssertEntitiesExist(&entity, 1);
-            var archetype = EntityComponentStore->GetArchetype(entity);
+            var access = GetCheckedEntityDataAccess();
+            var ecs = access->EntityComponentStore;
 
-            if ((uint) index >= archetype->TypesCount) return -1;
+            ecs->AssertEntitiesExist(&entity, 1);
+            var archetype = ecs->GetArchetype(entity);
+
+            if ((uint)index >= archetype->TypesCount) return -1;
 
             return archetype->Types[index + 1].TypeIndex;
         }

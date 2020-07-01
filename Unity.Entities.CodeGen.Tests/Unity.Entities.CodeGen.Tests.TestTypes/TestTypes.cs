@@ -25,10 +25,14 @@ namespace Unity.Entities.CodeGen.Tests.TestTypes
     {
         public int Value;
     }
-    
+
     public struct SharedDataInAnotherAssembly : ISharedComponentData
     {
         public int Value;
+    }
+
+    public struct TagComponentInAnotherAssembly : IComponentData
+    {
     }
 
 #if !UNITY_DISABLE_MANAGED_COMPONENTS
@@ -37,7 +41,7 @@ namespace Unity.Entities.CodeGen.Tests.TestTypes
         public float Value;
     }
 #endif
-    
+
     [InternalBufferCapacity(8)]
     public struct TestBufferElementInAnotherAssembly : IBufferElementData
     {

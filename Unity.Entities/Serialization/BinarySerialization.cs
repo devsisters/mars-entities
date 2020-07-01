@@ -1,6 +1,8 @@
 using System;
 #if !NET_DOTS
 using System.IO;
+using Unity.Assertions;
+using Unity.IO.LowLevel.Unsafe;
 #endif
 using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
@@ -91,35 +93,47 @@ namespace Unity.Entities.Serialization
 #if !NET_DOTS
     public unsafe class StreamBinaryReader : BinaryReader
     {
-        private Stream stream;
-        private byte[] buffer;
+        private readonly string filePath;
+        private long bytesRead;
 
-        public StreamBinaryReader(string fileName, int bufferSize = 65536)
+        [Obsolete("bufferSize parameter is no longer required. Use the single argument constructor for StreamBinaryReader instead. (RemovedAfter 2020-06-09)", false)]
+        public StreamBinaryReader(string filePath, long bufferSize = 65536) : this(filePath)
         {
-            stream = File.Open(fileName, FileMode.Open, FileAccess.Read);
-            buffer = new byte[bufferSize];
+        }
+
+        public StreamBinaryReader(string filePath)
+        {
+            bytesRead = 0;
+            this.filePath = filePath;
+            if (string.IsNullOrEmpty(filePath))
+                throw new ArgumentException("The filepath can neither be null nor empty", nameof(filePath));
         }
 
         public void Dispose()
         {
-            stream.Dispose();
         }
 
         public void ReadBytes(void* data, int bytes)
         {
-            int remaining = bytes;
-            int bufferSize = buffer.Length;
-
-            fixed (byte* fixedBuffer = buffer)
+            var readCmd = new ReadCommand
             {
-                while (remaining != 0)
-                {
-                    int read = stream.Read(buffer, 0, Math.Min(remaining, bufferSize));
-                    remaining -= read;
-                    UnsafeUtility.MemCpy(data, fixedBuffer, read);
-                    data = (byte*) data + read;
-                }
+                Size = bytes, Offset = bytesRead, Buffer = data
+            };
+            Assert.IsFalse(string.IsNullOrEmpty(filePath));
+#if ENABLE_PROFILER && UNITY_2020_2_OR_NEWER
+            // When AsyncReadManagerMetrics are available, mark up the file read for more informative IO metrics.
+            // Metrics can be retrieved by AsyncReadManagerMetrics.GetMetrics
+            var readHandle = AsyncReadManager.Read(filePath, &readCmd, 1, subsystem: AssetLoadingSubsystem.EntitiesStreamBinaryReader);
+#else
+            var readHandle = AsyncReadManager.Read(filePath, &readCmd, 1);
+#endif
+            readHandle.JobHandle.Complete();
+
+            if (readHandle.Status != ReadStatus.Complete)
+            {
+                throw new IOException($"Failed to read from {filePath}!");
             }
+            bytesRead += bytes;
         }
     }
 
@@ -180,7 +194,6 @@ namespace Unity.Entities.Serialization
             content.ResizeUninitialized(length + bytes);
             UnsafeUtility.MemCpy((byte*)content.GetUnsafePtr() + length, data, bytes);
         }
-
     }
 
     public unsafe class MemoryBinaryReader : BinaryReader
@@ -203,4 +216,3 @@ namespace Unity.Entities.Serialization
         }
     }
 }
-

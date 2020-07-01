@@ -1,4 +1,4 @@
-﻿using Unity.Collections;
+using Unity.Collections;
 using Unity.Entities;
 using Unity.Jobs;
 using Unity.Burst;
@@ -33,6 +33,7 @@ namespace Unity.Transforms
             }
         }
 
+#pragma warning disable 618
         [BurstCompile]
         struct CopyTransforms : IJobForEachWithEntity<LocalToWorld>
         {
@@ -51,6 +52,7 @@ namespace Unity.Transforms
                 };
             }
         }
+#pragma warning restore 618
 
         EntityQuery m_TransformGroup;
 

@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using Unity.Assertions;
+using Unity.Burst;
 using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
 
@@ -13,13 +14,26 @@ namespace Unity.Entities
         // ----------------------------------------------------------------------------------------------------------
 
         [Conditional("ENABLE_UNITY_COLLECTIONS_CHECKS")]
-        public void CheckInternalConsistency()
+        public void CheckInternalConsistency(object[] managedComponentData)
         {
+            Assert.IsTrue(ManagedChangesTracker.Empty);
+            var managedComponentIndices = new UnsafeBitArray(m_ManagedComponentIndex, Allocator.Temp);
+
+            Assert.IsTrue(managedComponentData.Length >= m_ManagedComponentIndex);
+            for (int i = m_ManagedComponentIndex; i < managedComponentData.Length; ++i)
+                Assert.IsNull(managedComponentData[i]);
+
+            EntityComponentStore* selfPtr;
+            fixed(EntityComponentStore* self = &this) { selfPtr = self; }  // This is safe - we're allocated on the native heap
+
             // Iterate by archetype
             var entityCountByArchetype = 0;
             for (var i = 0; i < m_Archetypes.Length; ++i)
             {
                 var archetype = m_Archetypes.Ptr[i];
+                int managedTypeBegin = archetype->FirstManagedComponent;
+                int managedTypeEnd = archetype->ManagedComponentsEnd;
+                Assert.AreEqual((IntPtr)selfPtr, (IntPtr)archetype->EntityComponentStore);
 
                 var countInArchetype = 0;
                 for (var j = 0; j < archetype->Chunks.Count; ++j)
@@ -29,21 +43,20 @@ namespace Unity.Entities
                     Assert.IsTrue(chunk->Capacity >= chunk->Count);
                     Assert.AreEqual(chunk->Count, archetype->Chunks.GetChunkEntityCount(j));
 
-                    var chunkEntities = (Entity*) chunk->Buffer;
+                    var chunkEntities = (Entity*)chunk->Buffer;
                     AssertEntitiesExist(chunkEntities, chunk->Count);
 
-                    if (!chunk->Locked)
+                    if (chunk->Count < chunk->Capacity)
                     {
-                        if (chunk->Count < chunk->Capacity)
-                            if (archetype->NumSharedComponents == 0)
-                            {
-                                Assert.IsTrue(chunk->ListWithEmptySlotsIndex >= 0 && chunk->ListWithEmptySlotsIndex <
-                                              archetype->ChunksWithEmptySlots.Length);
-                                Assert.IsTrue(
-                                    chunk == archetype->ChunksWithEmptySlots.Ptr[chunk->ListWithEmptySlotsIndex]);
-                            }
-                            else
-                                Assert.IsTrue(archetype->FreeChunksBySharedComponents.Contains(chunk));
+                        if (archetype->NumSharedComponents == 0)
+                        {
+                            Assert.IsTrue(chunk->ListWithEmptySlotsIndex >= 0 && chunk->ListWithEmptySlotsIndex < archetype->ChunksWithEmptySlots.Length);
+                            Assert.IsTrue(chunk == archetype->ChunksWithEmptySlots.Ptr[chunk->ListWithEmptySlotsIndex]);
+                        }
+                        else
+                        {
+                            Assert.IsTrue(archetype->FreeChunksBySharedComponents.Contains(chunk));
+                        }
                     }
 
                     countInArchetype += chunk->Count;
@@ -60,11 +73,28 @@ namespace Unity.Entities
                         AssertEntitiesExist(&chunk->metaChunkEntity, 1);
                         AssertEntityHasComponent(chunk->metaChunkEntity, chunkHeaderTypeIndex);
                         var chunkHeader =
-                            *(ChunkHeader*) GetComponentDataWithTypeRO(chunk->metaChunkEntity,
+                            *(ChunkHeader*)GetComponentDataWithTypeRO(chunk->metaChunkEntity,
                                 chunkHeaderTypeIndex);
                         Assert.IsTrue(chunk == chunkHeader.ArchetypeChunk.m_Chunk);
                         var metaChunk = GetChunk(chunk->metaChunkEntity);
                         Assert.IsTrue(metaChunk->Archetype == chunk->Archetype->MetaChunkArchetype);
+                        Assert.IsTrue(chunkHeader.ArchetypeChunk.m_EntityComponentStore == selfPtr);
+                    }
+
+                    for (int iType = managedTypeBegin; iType < managedTypeEnd; ++iType)
+                    {
+                        var managedIndicesInChunk = (int*)(chunk->Buffer + archetype->Offsets[iType]);
+                        for (int ie = 0; ie < chunk->Count; ++ie)
+                        {
+                            var index = managedIndicesInChunk[ie];
+                            if (index == 0)
+                                continue;
+
+                            Assert.AreEqual(managedComponentData[index].GetType(), TypeManager.GetType(archetype->Types[iType].TypeIndex));
+                            Assert.IsTrue(index < m_ManagedComponentIndex, "Managed component index in chunk is out of range.");
+                            Assert.IsFalse(managedComponentIndices.IsSet(index), "Managed component index is used multiple times.");
+                            managedComponentIndices.Set(index, true);
+                        }
                     }
                 }
 
@@ -72,6 +102,23 @@ namespace Unity.Entities
 
                 entityCountByArchetype += countInArchetype;
             }
+
+            for (int i = 0; i < m_ManagedComponentIndex; ++i)
+                Assert.AreEqual(managedComponentData[i] != null, managedComponentIndices.IsSet(i));
+
+            var freeManagedIndices = (int*)m_ManagedComponentFreeIndex.Ptr;
+            var freeManagedCount = m_ManagedComponentFreeIndex.Length / sizeof(int);
+
+            for (int i = 0; i < freeManagedCount; ++i)
+            {
+                var index = freeManagedIndices[i];
+                Assert.IsTrue(0 < index && index < m_ManagedComponentIndex, "Managed component index in free list is out of range.");
+                Assert.IsFalse(managedComponentIndices.IsSet(index), "Managed component was marked as free but is used in chunk.");
+                managedComponentIndices.Set(index, true);
+            }
+
+            Assert.IsTrue(m_ManagedComponentIndex - 1 == 0 || managedComponentIndices.TestAll(1, m_ManagedComponentIndex - 1), "Managed component index has leaked.");
+            managedComponentIndices.Dispose();
 
             // Iterate by free list
             Assert.IsTrue(m_EntityInChunkByEntity[m_NextFreeEntityIndex].Chunk == null);
@@ -82,12 +129,12 @@ namespace Unity.Entities
             {
                 Assert.IsTrue(m_EntityInChunkByEntity[freeIndex].Chunk == null);
                 Assert.IsTrue(freeIndex < EntitiesCapacity);
-                
+
                 freeIndex = m_EntityInChunkByEntity[freeIndex].IndexInChunk;
 
                 entityCountByFreeList--;
             }
-            
+
             // iterate by entities
             var entityCountByEntities = 0;
             var entityType = TypeManager.GetTypeIndex<Entity>();
@@ -99,23 +146,23 @@ namespace Unity.Entities
 
                 entityCountByEntities++;
                 var archetype = m_ArchetypeByEntity[i];
-                Assert.AreEqual((IntPtr) archetype, (IntPtr) chunk->Archetype);
+                Assert.AreEqual((IntPtr)archetype, (IntPtr)chunk->Archetype);
                 Assert.AreEqual(entityType, archetype->Types[0].TypeIndex);
                 Assert.IsTrue(m_EntityInChunkByEntity[i].IndexInChunk < m_EntityInChunkByEntity[i].Chunk->Count);
-                var entity = *(Entity*) ChunkDataUtility.GetComponentDataRO(m_EntityInChunkByEntity[i].Chunk,
+                var entity = *(Entity*)ChunkDataUtility.GetComponentDataRO(m_EntityInChunkByEntity[i].Chunk,
                     m_EntityInChunkByEntity[i].IndexInChunk, 0);
                 Assert.AreEqual(i, entity.Index);
                 Assert.AreEqual(m_VersionByEntity[i], entity.Version);
 
                 Assert.IsTrue(Exists(entity));
             }
-            
+
 
             Assert.AreEqual(entityCountByEntities, entityCountByArchetype);
-            
+
             // Enabling this fails SerializeEntitiesWorksWithBlobAssetReferences.
             // There is some special entity 0 usage in the serialization code.
-            
+
             // @TODO: Review with simon looks like a potential leak?
             //Assert.AreEqual(entityCountByEntities, entityCountByFreeList);
         }
@@ -138,14 +185,13 @@ namespace Unity.Entities
             Assert.AreEqual(rhs->m_NextFreeEntityIndex, lhs->m_NextFreeEntityIndex);
         }
 
-
         [Conditional("ENABLE_UNITY_COLLECTIONS_CHECKS")]
         public void ValidateEntity(Entity entity)
         {
             if (entity.Index < 0)
                 throw new ArgumentException(
                     $"All entities created using EntityCommandBuffer.CreateEntity must be realized via playback(). One of the entities is still deferred (Index: {entity.Index}).");
-            if ((uint) entity.Index >= (uint) EntitiesCapacity)
+            if ((uint)entity.Index >= (uint)EntitiesCapacity)
                 throw new ArgumentException(
                     "An Entity index is larger than the capacity of the EntityManager. This means the entity was created by a different world or the entity.Index got corrupted or incorrectly assigned and it may not be used on this EntityManager.");
         }
@@ -167,9 +213,9 @@ namespace Unity.Entities
                         $"It is not allowed to have two components of the same type on the same entity. ({types[i - 1]} and {types[i]})");
             }
         }
-        
+
         [Conditional("ENABLE_UNITY_COLLECTIONS_CHECKS")]
-        public void AssertCanCreateArchetype( ComponentType* componentTypes, int componentTypeCount )
+        public void AssertCanCreateArchetype(ComponentType* componentTypes, int componentTypeCount)
         {
             var entityTypeInfo = GetTypeInfo(m_EntityType);
             var archetypeInstanceSize = GetComponentArraySize(entityTypeInfo.SizeInChunk, 1);
@@ -195,7 +241,7 @@ namespace Unity.Entities
 
                 int index = entity->Index;
                 var exists = m_VersionByEntity[index] == entity->Version &&
-                             m_EntityInChunkByEntity[index].Chunk != null;
+                    m_EntityInChunkByEntity[index].Chunk != null;
                 if (!exists)
                     throw new ArgumentException(
                         "All entities passed to EntityManager must exist. One of the entities has already been destroyed or was never created.");
@@ -203,21 +249,13 @@ namespace Unity.Entities
         }
 
         [Conditional("ENABLE_UNITY_COLLECTIONS_CHECKS")]
-        public void AssertCanDestroy(Entity* entities, int count)
+        public void AssertValidEntities(Entity* entities, int count)
         {
-            for (var i = 0; i != count; i++)
+            for (var i = 0; i < count; i++)
             {
                 var entity = entities + i;
-                if (!Exists(*entity))
-                    continue;
 
-                int index = entity->Index;
-                var chunk = m_EntityInChunkByEntity[index].Chunk;
-                if (chunk->Locked)
-                {
-                    throw new InvalidOperationException(
-                        "Cannot destroy entities in locked Chunks. Unlock Chunk first.");
-                }
+                ValidateEntity(*entity);
             }
         }
 
@@ -253,39 +291,31 @@ namespace Unity.Entities
             var archetypeInstanceSize = archetype->InstanceSizeWithOverhead + componentInstanceSize;
             var chunkDataSize = Chunk.GetChunkBufferSize();
             if (archetypeInstanceSize > chunkDataSize)
-                throw new ArgumentException($"Entity archetype component data is too large after adding {componentType.ToString()}. Previous archetype size per instance {archetype->InstanceSizeWithOverhead}  bytes. Attempting to add component size {componentInstanceSize} bytes. Maximum chunk size {chunkDataSize}.");
-        }
-        
-        [Conditional("ENABLE_UNITY_COLLECTIONS_CHECKS")]
-        public void AssertCanAddComponent(Chunk* chunk, ComponentType componentType)
-        {
-            if (chunk->Locked)
-                throw new InvalidOperationException("Cannot add components to locked Chunks. Unlock Chunk first.");
+                throw new InvalidOperationException("Entity archetype component data is too large. Previous archetype size per instance {archetype->InstanceSizeWithOverhead}  bytes. Attempting to add component size {componentInstanceSize} bytes. Maximum chunk size {chunkDataSize}.");
         }
 
         [Conditional("ENABLE_UNITY_COLLECTIONS_CHECKS")]
         public void AssertCanAddComponent(Entity entity, ComponentType componentType)
         {
             if (!Exists(entity))
-                throw new ArgumentException("The entity does not exist");
+                throw new InvalidOperationException("The entity does not exist");
 
-            AssertCanAddComponent(GetChunk(entity), componentType);
             AssertCanAddComponent(GetArchetype(entity), componentType);
-       }
+        }
 
         [Conditional("ENABLE_UNITY_COLLECTIONS_CHECKS")]
         public void AssertCanAddComponent(Entity entity, int componentType)
         {
             AssertCanAddComponent(entity, ComponentType.FromTypeIndex(componentType));
         }
-        
+
         [Conditional("ENABLE_UNITY_COLLECTIONS_CHECKS")]
         public void AssertCanAddComponent(UnsafeMatchingArchetypePtrList archetypeList, ComponentType componentType)
         {
             for (int i = 0; i < archetypeList.Length; i++)
                 AssertCanAddComponent(archetypeList.Ptr[i]->Archetype, componentType);
         }
-        
+
         [Conditional("ENABLE_UNITY_COLLECTIONS_CHECKS")]
         public void AssertCanAddComponents(Entity entity, ComponentTypes types)
         {
@@ -294,65 +324,29 @@ namespace Unity.Entities
         }
 
         [Conditional("ENABLE_UNITY_COLLECTIONS_CHECKS")]
-        public void AssertCanAddComponent(NativeArray<ArchetypeChunk> chunkArray, ComponentType componentType)
-        {
-            var chunks = (ArchetypeChunk*) chunkArray.GetUnsafeReadOnlyPtr();
-            for (int i = 0; i < chunkArray.Length; ++i)
-                AssertCanAddComponent(chunks[i].m_Chunk, componentType);
-        }
-        
-        [Conditional("ENABLE_UNITY_COLLECTIONS_CHECKS")]
         public void AssertCanRemoveComponent(Entity entity, ComponentType componentType)
         {
             if (componentType == m_EntityComponentType)
                 throw new ArgumentException("Cannot remove Entity as a component. Use DestroyEntity if you want to delete Entity and all associated components.");
-        } 
-        
+        }
+
         [Conditional("ENABLE_UNITY_COLLECTIONS_CHECKS")]
         public void AssertCanRemoveComponents(Entity entity, ComponentTypes types)
         {
             for (int i = 0; i < types.Length; ++i)
                 AssertCanRemoveComponent(entity, ComponentType.FromTypeIndex(types.GetTypeIndex(i)));
         }
-        
-        [Conditional("ENABLE_UNITY_COLLECTIONS_CHECKS")]
-        public void AssertCanRemoveComponent(NativeArray<ArchetypeChunk> chunkArray, ComponentType componentType)
-        {
-            var chunks = (ArchetypeChunk*) chunkArray.GetUnsafeReadOnlyPtr();
-            for (int i = 0; i < chunkArray.Length; ++i)
-            {
-                var chunk = chunks[i].m_Chunk;
-                if (ChunkDataUtility.GetIndexInTypeArray(chunk->Archetype, componentType.TypeIndex) != -1)
-                {
-                    if (chunk->Locked)
-                        throw new InvalidOperationException(
-                            "Cannot remove components from locked Chunks. Unlock Chunk first.");
-                }
-            }
-        }
-
-        [Conditional("ENABLE_UNITY_COLLECTIONS_CHECKS")]
-        public void AssertCanDestroy(NativeArray<ArchetypeChunk> chunkArray)
-        {
-            var chunks = (ArchetypeChunk*) chunkArray.GetUnsafeReadOnlyPtr();
-            for (int i = 0; i < chunkArray.Length; ++i)
-            {
-                var chunk = chunks[i].m_Chunk;
-                if (chunk->Locked)
-                    throw new InvalidOperationException(
-                        "Cannot destroy entities from locked Chunks. Unlock Chunk first.");
-            }
-        }
-
 
         [Conditional("ENABLE_UNITY_COLLECTIONS_CHECKS")]
         public void AssertWillDestroyAllInLinkedEntityGroup(NativeArray<ArchetypeChunk> chunkArray,
-            ArchetypeChunkBufferType<LinkedEntityGroup> linkedGroupType)
+            ArchetypeChunkBufferType<LinkedEntityGroup> linkedGroupType,
+            ref Entity errorEntity,
+            ref Entity errorReferencedEntity)
         {
-            var chunks = (ArchetypeChunk*) chunkArray.GetUnsafeReadOnlyPtr();
+            var chunks = (ArchetypeChunk*)chunkArray.GetUnsafeReadOnlyPtr();
             var chunksCount = chunkArray.Length;
 
-            var tempChunkStateFlag = (uint) ChunkFlags.TempAssertWillDestroyAllInLinkedEntityGroup;
+            var tempChunkStateFlag = (uint)ChunkFlags.TempAssertWillDestroyAllInLinkedEntityGroup;
             for (int i = 0; i != chunksCount; i++)
             {
                 var chunk = chunks[i].m_Chunk;
@@ -360,7 +354,8 @@ namespace Unity.Entities
                 chunk->Flags |= tempChunkStateFlag;
             }
 
-            string error = null;
+            errorEntity = default;
+            errorReferencedEntity = default;
 
             for (int i = 0; i < chunkArray.Length; ++i)
             {
@@ -374,7 +369,7 @@ namespace Unity.Entities
                 {
                     var buffer = buffers[b];
                     int entityCount = buffer.Length;
-                    var entities = (Entity*) buffer.GetUnsafePtr();
+                    var entities = (Entity*)buffer.GetUnsafeReadOnlyPtr();
                     for (int e = 0; e != entityCount; e++)
                     {
                         var referencedEntity = entities[e];
@@ -383,8 +378,10 @@ namespace Unity.Entities
                             var referencedChunk = GetChunk(referencedEntity);
 
                             if ((referencedChunk->Flags & tempChunkStateFlag) == 0)
-                                error =
-                                    $"DestroyEntity(EntityQuery query) is destroying entity {entities[0]} which contains a LinkedEntityGroup and the entity {entities[e]} in that group is not included in the query. If you want to destroy entities using a query all linked entities must be contained in the query..";
+                            {
+                                errorEntity = entities[0];
+                                errorReferencedEntity = referencedEntity;
+                            }
                         }
                     }
                 }
@@ -396,17 +393,27 @@ namespace Unity.Entities
                 Assert.IsTrue((chunk->Flags & tempChunkStateFlag) != 0);
                 chunk->Flags &= ~tempChunkStateFlag;
             }
-
-            if (error != null)
-                throw new ArgumentException(error);
         }
-        
+
+        public void ThrowDestroyEntityError(Entity errorEntity, Entity errorReferencedEntity)
+        {
+            ThrowDestroyEntityErrorFancy(errorEntity, errorReferencedEntity);
+            throw new ArgumentException($"DestroyEntity(EntityQuery query) is destroying an entity which contains a LinkedEntityGroup with an entity not included in the query. If you want to destroy entities using a query all linked entities must be contained in the query.. For more detail, disable Burst compilation.");
+        }
+
+        [BurstDiscard]
+        private void ThrowDestroyEntityErrorFancy(Entity errorEntity, Entity errorReferencedEntity)
+        {
+            throw new ArgumentException($"DestroyEntity(EntityQuery query) is destroying entity {errorEntity} which contains a LinkedEntityGroup and the entity {errorReferencedEntity} in that group is not included in the query. If you want to destroy entities using a query all linked entities must be contained in the query..");
+        }
+
+
         [Conditional("ENABLE_UNITY_COLLECTIONS_CHECKS")]
         public static void AssertArchetypeDoesNotRemoveSystemStateComponents(Archetype* src, Archetype* dst)
         {
             int o = 0;
             int n = 0;
-            
+
             for (; n < src->TypesCount && o < dst->TypesCount;)
             {
                 int srcType = src->Types[o].TypeIndex;
@@ -437,23 +444,16 @@ namespace Unity.Entities
         [Conditional("ENABLE_UNITY_COLLECTIONS_CHECKS")]
         public void AssertCanAddChunkComponent(NativeArray<ArchetypeChunk> chunkArray, ComponentType componentType)
         {
-            var chunks = (ArchetypeChunk*) chunkArray.GetUnsafeReadOnlyPtr();
+            var chunks = (ArchetypeChunk*)chunkArray.GetUnsafeReadOnlyPtr();
             for (int i = 0; i < chunkArray.Length; ++i)
             {
                 var chunk = chunks[i].m_Chunk;
                 if (ChunkDataUtility.GetIndexInTypeArray(chunk->Archetype, componentType.TypeIndex) != -1)
                     throw new ArgumentException(
                         $"A chunk component with type:{componentType} has already been added to the chunk.");
-                if (chunk->Locked)
-                    throw new InvalidOperationException(
-                        "Cannot add chunk components to locked Chunks. Unlock Chunk first.");
-                if ((chunk->metaChunkEntity != Entity.Null) && GetChunk(chunk->metaChunkEntity)->Locked)
-                    throw new InvalidOperationException(
-                        "Cannot add chunk components if Meta Chunk is locked. Unlock Meta Chunk first.");
             }
         }
 
-        
         [Conditional("ENABLE_UNITY_COLLECTIONS_CHECKS")]
         public void AssertCanInstantiateEntities(Entity srcEntity, Entity* outputEntities, int instanceCount)
         {
@@ -465,17 +465,17 @@ namespace Unity.Entities
 
                 if (entityCount == 0 || entityPtr[0] != srcEntity)
                     throw new ArgumentException("LinkedEntityGroup[0] must always be the Entity itself.");
-                
+
                 for (int i = 0; i < entityCount; i++)
                 {
                     if (!Exists(entityPtr[i]))
                         throw new ArgumentException(
-                            "The srcEntity's LinkedEntityGroup references an entity that is invalid. (Entity at index {i} on the LinkedEntityGroup.)");
+                            $"The srcEntity's LinkedEntityGroup references an entity that is invalid. (Entity at index {i} on the LinkedEntityGroup.)");
 
                     var archetype = GetArchetype(entityPtr[i]);
-                    if (archetype->InstantiableArchetype == null)
+                    if (archetype->InstantiateArchetype == null)
                         throw new ArgumentException(
-                            "The srcEntity's LinkedEntityGroup references an entity that has already been destroyed. (Entity at index {i} on the LinkedEntityGroup. Only system state components are left on the entity)");
+                            $"The srcEntity's LinkedEntityGroup references an entity that has already been destroyed. (Entity at index {i} on the LinkedEntityGroup. Only system state components are left on the entity)");
                 }
             }
             else
@@ -484,19 +484,35 @@ namespace Unity.Entities
                     throw new ArgumentException("srcEntity is not a valid entity");
 
                 var srcArchetype = GetArchetype(srcEntity);
-                if (srcArchetype->InstantiableArchetype == null)
+                if (srcArchetype->InstantiateArchetype == null)
                     throw new ArgumentException(
                         "srcEntity is not instantiable because it has already been destroyed. (Only system state components are left on it)");
             }
         }
-        
-        
+
+        [Conditional("ENABLE_UNITY_COLLECTIONS_CHECKS")]
+        public void AssertCanInstantiateEntities(Entity* srcEntity, int entityCount, bool removePrefab)
+        {
+            for (int i = 0; i < entityCount; i++)
+            {
+                if (!Exists(srcEntity[i]))
+                    throw new ArgumentException(
+                        $"The srcEntity[{i}] references an entity that is invalid.");
+
+                var archetype = GetArchetype(srcEntity[i]);
+                if ((removePrefab ? archetype->InstantiateArchetype : archetype->CopyArchetype) == null)
+                    throw new ArgumentException(
+                        $"The srcEntity[{i}] references an entity that has already been destroyed. (Only system state components are left on the entity)");
+            }
+        }
+
         [Conditional("ENABLE_UNITY_COLLECTIONS_CHECKS")]
         public static void AssertValidEntityQuery(EntityQuery query, EntityComponentStore* store)
         {
-            if (query._EntityComponentStore != store)
+            var e = query._GetImpl()->_Access->EntityComponentStore;
+            if (e != store)
             {
-                AssertValidEntityQuery(query._EntityComponentStore, store);
+                AssertValidEntityQuery(e, store);
             }
         }
 
@@ -523,10 +539,10 @@ namespace Unity.Entities
                 else
                     throw new System.ArgumentException("The EntityArchetype was not created by this EntityManager");
             }
-                
+
             #endif
         }
-        
+
         // ----------------------------------------------------------------------------------------------------------
         // INTERNAL
         // ----------------------------------------------------------------------------------------------------------

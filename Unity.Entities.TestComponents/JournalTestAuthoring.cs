@@ -1,4 +1,5 @@
 using System;
+using Unity.Entities;
 using UnityEngine;
 
 namespace Unity.Entities.Tests
@@ -11,7 +12,7 @@ namespace Unity.Entities.Tests
         public bool ShouldError;
         public bool ShouldErrorNoContext;
         public bool ShouldThrow;
-        
+
         public void Convert(Entity entity, EntityManager manager, GameObjectConversionSystem conversionSystem)
         {
             if (ShouldWarn)

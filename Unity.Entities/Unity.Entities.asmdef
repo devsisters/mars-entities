@@ -5,9 +5,10 @@
         "Unity.Burst",
         "Unity.Mathematics",
         "Unity.Mathematics.Extensions",
-        "Unity.Entities.StaticTypeRegistry",
         "Unity.Properties",
-        "Unity.Properties.Reflection"
+        "Unity.Properties.Reflection",
+        "Unity.Serialization",
+        "Unity.Jobs"
     ],
     "optionalUnityReferences": [],
     "includePlatforms": [],

@@ -11,19 +11,19 @@ namespace Unity.Entities
         public bool IsZeroSized => (TypeIndex & TypeManager.ZeroSizeInChunkTypeFlag) != 0;
         public bool IsChunkComponent => (TypeIndex & TypeManager.ChunkComponentTypeFlag) != 0;
         public bool HasEntityReferences => (TypeIndex & TypeManager.HasNoEntityReferencesFlag) == 0;
-        public bool IsManagedComponent => (TypeIndex & TypeManager.ManagedComponentTypeFlag) != 0;
+        public bool IsManagedComponent => TypeManager.IsManagedComponent(TypeIndex);
 
         public ComponentTypeInArchetype(ComponentType type)
         {
             TypeIndex = type.TypeIndex;
         }
 
-        public static bool operator == (ComponentTypeInArchetype lhs, ComponentTypeInArchetype rhs)
+        public static bool operator==(ComponentTypeInArchetype lhs, ComponentTypeInArchetype rhs)
         {
             return lhs.TypeIndex == rhs.TypeIndex;
         }
 
-        public static bool operator != (ComponentTypeInArchetype lhs, ComponentTypeInArchetype rhs)
+        public static bool operator!=(ComponentTypeInArchetype lhs, ComponentTypeInArchetype rhs)
         {
             return lhs.TypeIndex != rhs.TypeIndex;
         }
@@ -44,22 +44,22 @@ namespace Unity.Entities
         //12. Chunk Dynamic buffer components (IBufferElementData)
         //13. Chunk System state dynamic buffer components (ISystemStateBufferElementData)
 
-        public static bool operator < (ComponentTypeInArchetype lhs, ComponentTypeInArchetype rhs)
+        public static bool operator<(ComponentTypeInArchetype lhs, ComponentTypeInArchetype rhs)
         {
             return lhs.TypeIndex < rhs.TypeIndex;
         }
 
-        public static bool operator > (ComponentTypeInArchetype lhs, ComponentTypeInArchetype rhs)
+        public static bool operator>(ComponentTypeInArchetype lhs, ComponentTypeInArchetype rhs)
         {
             return lhs.TypeIndex > rhs.TypeIndex;
         }
 
-        public static bool operator <= (ComponentTypeInArchetype lhs, ComponentTypeInArchetype rhs)
+        public static bool operator<=(ComponentTypeInArchetype lhs, ComponentTypeInArchetype rhs)
         {
             return !(lhs > rhs);
         }
 
-        public static bool operator >= (ComponentTypeInArchetype lhs, ComponentTypeInArchetype rhs)
+        public static bool operator>=(ComponentTypeInArchetype lhs, ComponentTypeInArchetype rhs)
         {
             return !(lhs < rhs);
         }
@@ -88,10 +88,11 @@ namespace Unity.Entities
         {
             return ToComponentType().ToString();
         }
+
 #endif
         public override bool Equals(object obj)
         {
-            if (obj is ComponentTypeInArchetype) return (ComponentTypeInArchetype) obj == this;
+            if (obj is ComponentTypeInArchetype) return (ComponentTypeInArchetype)obj == this;
 
             return false;
         }

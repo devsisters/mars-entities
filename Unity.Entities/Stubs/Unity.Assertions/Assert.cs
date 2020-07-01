@@ -1,10 +1,10 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 
 namespace Unity.Assertions
 {
     // TODO: provide an implementation of Unity.Assertions.Assert that does not rely on UnityEngine.
     [DebuggerStepThrough]
-    static class Assert
+    public static class Assert
     {
         [Conditional("UNITY_ASSERTIONS")]
         public static void IsTrue(bool condition)

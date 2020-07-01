@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using System.Linq;
 using NUnit.Framework;
 using Unity.Entities.Tests;
@@ -37,8 +37,9 @@ namespace Unity.Entities.Editor.Tests
 
             World2 = new World("Test World 2");
             var emptySys = World2.GetOrCreateSystem<EmptySystem>();
-            World.GetOrCreateSystem<SimulationSystemGroup>().AddSystemToUpdateList(emptySys);
-            World.GetOrCreateSystem<SimulationSystemGroup>().SortSystemUpdateList();
+            var simGroup = World.GetOrCreateSystem<SimulationSystemGroup>();
+            simGroup.AddSystemToUpdateList(emptySys);
+            simGroup.SortSystems();
         }
 
         public override void TearDown()
@@ -48,7 +49,7 @@ namespace Unity.Entities.Editor.Tests
 
             base.TearDown();
 
-            ScriptBehaviourUpdateOrder.UpdatePlayerLoop(null);
+            ScriptBehaviourUpdateOrder.UpdatePlayerLoop(m_PreviousWorld);
         }
 
         [Test]
@@ -164,12 +165,19 @@ namespace Unity.Entities.Editor.Tests
             var listView = new SystemListView(
                 new TreeViewState(),
                 new MultiColumnHeader(SystemListView.GetHeaderState()),
-                (system, world) => { },
+                (system, world) => {},
                 () => World2,
                 () => true);
             var systemItems = listView.GetRows().Where(x => listView.systemsById.ContainsKey(x.id)).Select(x => listView.systemsById[x.id]);
             var systemList = systemItems.ToList();
-            Assert.AreEqual(World2.Systems.Count(), systemList.Intersect(World2.Systems).Count());
+
+            var world2Systems = new List<ComponentSystemBase>();
+            foreach (var system in World2.Systems)
+            {
+                world2Systems.Add(system);
+            }
+
+            Assert.That(world2Systems, Is.EquivalentTo(systemList.Intersect(world2Systems)));
         }
 
         [Test]
@@ -178,16 +186,21 @@ namespace Unity.Entities.Editor.Tests
             var listView = new SystemListView(
                 new TreeViewState(),
                 new MultiColumnHeader(SystemListView.GetHeaderState()),
-                (system, world) => { },
+                (system, world) => {},
                 () => null,
                 () => true);
             var systemItems = listView.GetRows().Where(x => listView.systemsById.ContainsKey(x.id)).Select(x => listView.systemsById[x.id]);
             var allSystems = new List<ComponentSystemBase>();
-            allSystems.AddRange(World.Systems);
-            allSystems.AddRange(World2.Systems);
+            foreach (var system in World.Systems)
+            {
+                allSystems.Add(system);
+            }
+            foreach (var system in World2.Systems)
+            {
+                allSystems.Add(system);
+            }
             var systemList = systemItems.ToList();
-            Assert.AreEqual(allSystems.Count(x => !(x is ComponentSystemGroup) ), allSystems.Intersect(systemList).Count());
+            Assert.AreEqual(allSystems.Count(x => !(x is ComponentSystemGroup)), allSystems.Intersect(systemList).Count());
         }
-
     }
 }

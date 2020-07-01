@@ -36,6 +36,7 @@ namespace Unity.Entities
             {
                 return true;
             }
+
             public override int GetHashCode()
             {
                 return 0;
@@ -76,7 +77,7 @@ namespace Unity.Entities
 
         private unsafe static TypeInfo CreateManagedTypeInfo(Type t)
         {
-            // ISharedComponentData Type must implement IEquatable<T> 
+            // ISharedComponentData Type must implement IEquatable<T>
             if (typeof(ISharedComponentData).IsAssignableFrom(t))
             {
                 if (!typeof(IEquatable<>).MakeGenericType(t).IsAssignableFrom(t))
@@ -95,7 +96,7 @@ namespace Unity.Entities
             MethodInfo equalsFn = null;
             MethodInfo getHashFn = null;
 
-            if (t.IsClass) 
+            if (t.IsClass)
             {
                 if (typeof(IEquatable<>).MakeGenericType(t).IsAssignableFrom(t))
                     equalsFn = typeof(ManagedCompareImpl<>).MakeGenericType(t).GetMethod(nameof(ManagedCompareImpl<Dummy>.CompareFunc));
@@ -151,6 +152,7 @@ namespace Unity.Entities
 
             return new TypeInfo { Layouts = layoutsArray, Hash = hash };
         }
+
 #endif
 
         public struct Layout
@@ -184,11 +186,12 @@ namespace Unity.Entities
             public static TypeInfo Null => new TypeInfo();
         }
 
+#if !NET_DOTS
         private unsafe struct PointerSize
         {
             private void* pter;
         }
-#if !NET_DOTS
+
         struct FieldData
         {
             public int Offset;
@@ -274,6 +277,7 @@ namespace Unity.Entities
                 }
             }
         }
+
 #endif
         private const int FNV_32_PRIME = 0x01000193;
 
@@ -282,18 +286,18 @@ namespace Unity.Entities
 #if !NET_DOTS
         public static unsafe int ManagedGetHashCode(object lhs, TypeInfo typeInfo)
         {
-			var fn = (TypeInfo.ManagedGetHashCodeDelegate)typeInfo.GetHashFn;
-			if(fn != null)
-				return fn(lhs);
+            var fn = (TypeInfo.ManagedGetHashCodeDelegate)typeInfo.GetHashFn;
+            if (fn != null)
+                return fn(lhs);
 
             int hash = 0;
             using (var buffer = new UnsafeAppendBuffer(16, 16, Allocator.Temp))
             {
-                var writer = new PropertiesBinaryWriter(&buffer);
-                BoxedProperties.WriteBoxedType(lhs, writer);
+                var writer = new ManagedObjectBinaryWriter(&buffer);
+                writer.WriteObject(lhs);
 
-                var remainder = buffer.Size & (sizeof(int) - 1);
-                var alignedSize = buffer.Size - remainder;
+                var remainder = buffer.Length & (sizeof(int) - 1);
+                var alignedSize = buffer.Length - remainder;
                 var bufferPtrAtEndOfAlignedData = buffer.Ptr + alignedSize;
                 for (int i = 0; i < alignedSize; i += sizeof(int))
                 {
@@ -305,7 +309,7 @@ namespace Unity.Entities
                     hash *= FNV_32_PRIME;
                     hash ^= *(byte*)(bufferPtrAtEndOfAlignedData + i);
                 }
-                foreach(var obj in writer.GetObjectTable())
+                foreach (var obj in writer.GetUnityObjects())
                 {
                     hash *= FNV_32_PRIME;
                     hash ^= obj.GetHashCode();
@@ -314,6 +318,7 @@ namespace Unity.Entities
 
             return hash;
         }
+
 #endif
 
         public static unsafe int GetHashCode<T>(T lhs, TypeInfo typeInfo) where T : struct
@@ -337,13 +342,13 @@ namespace Unity.Entities
 #endif
 
             var layout = typeInfo.Layouts;
-            var data = (byte*) dataPtr;
+            var data = (byte*)dataPtr;
             uint hash = 0;
 
             for (var k = 0; k != layout.Length; k++)
                 if (layout[k].Aligned4)
                 {
-                    var dataInt = (uint*) (data + layout[k].offset);
+                    var dataInt = (uint*)(data + layout[k].offset);
                     var count = layout[k].count;
                     for (var i = 0; i != count; i++)
                     {
@@ -362,39 +367,20 @@ namespace Unity.Entities
                     }
                 }
 
-            return (int) hash;
+            return (int)hash;
         }
 
 #if !NET_DOTS
         public static unsafe bool ManagedEquals(object lhs, object rhs, TypeInfo typeInfo)
         {
-			var fn = (TypeInfo.ManagedCompareEqualDelegate) typeInfo.EqualFn;
-			
-			if(fn != null)
-				return fn(lhs, rhs);
-				
-            using (var bufferLHS = new UnsafeAppendBuffer(512, 16, Allocator.Temp))
-            using (var bufferRHS = new UnsafeAppendBuffer(512, 16, Allocator.Temp))
-            {
-                var writerLHS = new PropertiesBinaryWriter(&bufferLHS);
-                BoxedProperties.WriteBoxedType(lhs, writerLHS);
-                var writerRHS = new PropertiesBinaryWriter(&bufferRHS);
-                BoxedProperties.WriteBoxedType(rhs, writerRHS);
+            var fn = (TypeInfo.ManagedCompareEqualDelegate)typeInfo.EqualFn;
 
-                if (UnsafeUtility.MemCmp(bufferLHS.Ptr, bufferRHS.Ptr, bufferLHS.Size) != 0)
-                    return false;
+            if (fn != null)
+                return fn(lhs, rhs);
 
-                var objectTableLHS = writerLHS.GetObjectTable();
-                var objectTableRHS = writerRHS.GetObjectTable(); 
-                Assertions.Assert.AreEqual(objectTableLHS.Length, objectTableRHS.Length);
-
-                for (int i = 0; i < objectTableLHS.Length; ++i)
-                    if (!objectTableLHS[i].Equals(objectTableRHS[i]))
-                        return false;
-            }
-
-            return true;
+            return new ManagedObjectEqual().CompareEqual(lhs, rhs);
         }
+
 #endif
 
         public static unsafe bool Equals<T>(T lhs, T rhs, TypeInfo typeInfo) where T : struct
@@ -412,14 +398,14 @@ namespace Unity.Entities
 #if !NET_DOTS
             if (typeInfo.EqualFn != null)
             {
-                var fn = (TypeInfo.CompareEqualDelegate) typeInfo.EqualFn;
+                var fn = (TypeInfo.CompareEqualDelegate)typeInfo.EqualFn;
                 return fn(lhsPtr, rhsPtr);
             }
 #endif
 
             var layout = typeInfo.Layouts;
-            var lhs = (byte*) lhsPtr;
-            var rhs = (byte*) rhsPtr;
+            var lhs = (byte*)lhsPtr;
+            var rhs = (byte*)rhsPtr;
 
             var same = true;
 
@@ -427,8 +413,8 @@ namespace Unity.Entities
                 if (layout[k].Aligned4)
                 {
                     var offset = layout[k].offset;
-                    var lhsInt = (uint*) (lhs + offset);
-                    var rhsInt = (uint*) (rhs + offset);
+                    var lhsInt = (uint*)(lhs + offset);
+                    var rhsInt = (uint*)(rhs + offset);
                     var count = layout[k].count;
                     for (var i = 0; i != count; i++)
                         same &= lhsInt[i] == rhsInt[i];
@@ -485,6 +471,7 @@ namespace Unity.Entities
                 output.Add(typeof(GetHashCodeImpl<>).MakeGenericType(type).ToString());
             }
         }
+
 #endif
-        }
     }
+}

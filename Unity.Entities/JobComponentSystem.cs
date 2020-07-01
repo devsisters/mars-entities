@@ -11,17 +11,17 @@ namespace Unity.Entities
     /// <remarks>Implement a JobComponentSystem subclass for systems that perform their work using
     /// <see cref="IJobForEach{T0}"/> or <see cref="IJobChunk"/>.</remarks>
     /// <seealso cref="ComponentSystem"/>
-    public abstract class JobComponentSystem : ComponentSystemBase
+    public unsafe abstract class JobComponentSystem : ComponentSystemBase
     {
-        JobHandle m_PreviousFrameDependency;
-        bool m_AlwaysSynchronizeSystem;
-        
+        private JobHandle m_PreviousFrameDependency;
+        private bool m_AlwaysSynchronizeSystem;
+
         /// <summary>
         /// Use Entities.ForEach((ref Translation translation, in Velocity velocity) => { translation.Value += velocity.Value * dt; }).Schedule(inputDependencies);
         /// </summary>
-        protected internal ForEachLambdaJobDescription Entities => new ForEachLambdaJobDescription();
+        protected internal ForEachLambdaJobDescriptionJCS Entities => new ForEachLambdaJobDescriptionJCS();
 
-#if ENABLE_DOTS_COMPILER_CHUNKS        
+#if ENABLE_DOTS_COMPILER_CHUNKS
         /// <summary>
         /// Use query.Chunks.ForEach((ArchetypeChunk chunk, int chunkIndex, int indexInQueryOfFirstEntity) => { YourCodeGoesHere(); }).Schedule();
         /// </summary>
@@ -33,21 +33,23 @@ namespace Unity.Entities
             }
         }
 #endif
-        
+
         /// <summary>
         /// Use Job.WithCode(() => { YourCodeGoesHere(); }).Schedule(inputDependencies);
         /// </summary>
-        protected internal LambdaSingleJobDescription Job
+        protected internal LambdaSingleJobDescriptionJCS Job
         {
             get
             {
-                return new LambdaSingleJobDescription();
+                return new LambdaSingleJobDescriptionJCS();
             }
         }
 
         unsafe JobHandle BeforeOnUpdate()
         {
             BeforeUpdateVersioning();
+
+            var state = CheckedState();
 
             // We need to wait on all previous frame dependencies, otherwise it is possible that we create infinitely long dependency chains
             // without anyone ever waiting on it
@@ -59,8 +61,10 @@ namespace Unity.Entities
                 return default;
             }
 
-            return m_DependencyManager->GetDependency(m_JobDependencyForReadingSystems.Ptr, m_JobDependencyForReadingSystems.Length, m_JobDependencyForWritingSystems.Ptr, m_JobDependencyForWritingSystems.Length);
+            var depMgr = state->m_EntityManager.GetCheckedEntityDataAccess()->DependencyManager;
+            return depMgr->GetDependency(state->m_JobDependencyForReadingSystems.Ptr, state->m_JobDependencyForReadingSystems.Length, state->m_JobDependencyForWritingSystems.Ptr, state->m_JobDependencyForWritingSystems.Length);
         }
+
 #pragma warning disable 649
         private unsafe struct JobHandleData
         {
@@ -73,38 +77,46 @@ namespace Unity.Entities
         {
             AfterUpdateVersioning();
 
+            var state = CheckedState();
+
+            var depMgr = state->m_EntityManager.GetCheckedEntityDataAccess()->DependencyManager;
+
             // If outputJob says no relevant jobs were scheduled,
             // then no need to batch them up or register them.
             // This is a big optimization if we only Run methods on main thread...
-            if (((JobHandleData*) &outputJob)->jobGroup != null) 
+            if (((JobHandleData*)&outputJob)->jobGroup != null)
             {
                 JobHandle.ScheduleBatchedJobs();
 
-                m_PreviousFrameDependency = m_DependencyManager->AddDependency(m_JobDependencyForReadingSystems.Ptr, m_JobDependencyForReadingSystems.Length, m_JobDependencyForWritingSystems.Ptr, m_JobDependencyForWritingSystems.Length, outputJob);
+                m_PreviousFrameDependency = depMgr->AddDependency(state->m_JobDependencyForReadingSystems.Ptr, state->m_JobDependencyForReadingSystems.Length, state->m_JobDependencyForWritingSystems.Ptr, state->m_JobDependencyForWritingSystems.Length, outputJob);
             }
 
 #if ENABLE_UNITY_COLLECTIONS_CHECKS
 
             if (JobsUtility.JobDebuggerEnabled)
             {
-                var dependencyError = SystemDependencySafetyUtility.CheckSafetyAfterUpdate(this, ref m_JobDependencyForReadingSystems, ref m_JobDependencyForWritingSystems, m_DependencyManager);
-                if (throwException && dependencyError != null)
-                    throw new InvalidOperationException(dependencyError);
+                var details = default(SystemDependencySafetyUtility.SafetyErrorDetails);
+                var dependencyError = false;
+                state->CheckSafety(ref details, ref dependencyError);
+                if (throwException && dependencyError)
+                    throw new InvalidOperationException(details.FormatToString(GetType()));
             }
 #endif
         }
 
         public sealed override void Update()
         {
+            var state = CheckedState();
+
 #if ENABLE_PROFILER
-            using (m_ProfilerMarker.Auto())
+            using (state->m_ProfilerMarker.Auto())
 #endif
             {
                 if (Enabled && ShouldRunSystem())
                 {
-                    if (!m_PreviouslyEnabled)
+                    if (!state->m_PreviouslyEnabled)
                     {
-                        m_PreviouslyEnabled = true;
+                        state->m_PreviouslyEnabled = true;
                         OnStartRunning();
                     }
 
@@ -135,27 +147,26 @@ namespace Unity.Entities
 
                     AfterOnUpdate(outputJob, true);
                 }
-                else if (m_PreviouslyEnabled)
+                else if (state->m_PreviouslyEnabled)
                 {
-                    m_PreviouslyEnabled = false;
+                    state->m_PreviouslyEnabled = false;
                     OnStopRunning();
                 }
             }
         }
-        
+
         internal sealed override void OnBeforeCreateInternal(World world)
         {
+            var state = CheckedState();
+
             base.OnBeforeCreateInternal(world);
 #if !NET_DOTS
             m_AlwaysSynchronizeSystem = GetType().GetCustomAttributes(typeof(AlwaysSynchronizeSystemAttribute), true).Length != 0;
 #else
             m_AlwaysSynchronizeSystem = false;
-            var attrs = TypeManager.GetSystemAttributes(GetType());
-            foreach (var attr in attrs)
-            {
-                if (attr.GetType() == typeof(AlwaysSynchronizeSystemAttribute))
-                    m_AlwaysSynchronizeSystem = true;
-            }
+            var attrs = TypeManager.GetSystemAttributes(GetType(), typeof(AlwaysSynchronizeSystemAttribute));
+            if (attrs.Length > 0)
+                m_AlwaysSynchronizeSystem = true;
 #endif
         }
 
@@ -181,6 +192,5 @@ namespace Unity.Entities
         /// <param name="inputDeps">Existing dependencies for this system.</param>
         /// <returns>A Job handle that contains the dependencies of the Jobs in this system.</returns>
         protected abstract JobHandle OnUpdate(JobHandle inputDeps);
-
     }
 }

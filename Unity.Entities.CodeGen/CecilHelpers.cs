@@ -1,12 +1,12 @@
 using System;
-using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
+using Mono.Cecil.Rocks;
+using Unity.Entities.CodeGeneratedJobForEach;
 #if !UNITY_DOTSPLAYER
-using System.Reflection;
-using UnityEngine;
 using UnityEngine.Scripting;
 #endif
 using MethodAttributes = Mono.Cecil.MethodAttributes;
@@ -64,6 +64,8 @@ namespace Unity.Entities.CodeGen
         public static SequencePoint FindBestSequencePointFor(MethodDefinition method, Instruction instruction)
         {
             var sequencePoints = method.DebugInformation?.GetSequencePointMapping().Values.OrderBy(s => s.Offset).ToList();
+            if (sequencePoints == null || !sequencePoints.Any())
+                return null;
 
             for (int i = 0; i != sequencePoints.Count-1; i++)
             {
@@ -102,12 +104,13 @@ namespace Unity.Entities.CodeGen
                 currentInstruction = currentInstruction.Previous;
             }
         }
-        
+
         public static (MethodDefinition[], Dictionary<FieldReference, CapturedVariableDescription> capturedVariables) CloneClosureExecuteMethodAndItsLocalFunctions(
-            IEnumerable<MethodDefinition> methodsToClone, TypeDefinition targetType, string newMethodName)
+            IEnumerable<MethodDefinition> methodsToClone, TypeDefinition targetType, string newMethodName, 
+            Func<IEnumerable<MethodDefinition>, IEnumerable<Instruction>> permittedCapturingInstructionsGenerator)
         {
             Dictionary<FieldReference, CapturedVariableDescription> capturedVariables = new Dictionary<FieldReference, CapturedVariableDescription>();
-            
+
             // Construct list of all DisplayClasses under our declaring type (we need to do this as other delegates might use generate their own DisplayClasses)
             var lambdaDisplayClasses = DisplayClassDescendants(methodsToClone.First().DeclaringType);
             
@@ -119,19 +122,26 @@ namespace Unity.Entities.CodeGen
                     .Where(i => (i.IsLoadFieldOrLoadFieldAddress() || i.IsStoreField()) && i.Operand is FieldReference &&
                         !(i.Operand as FieldReference).FieldType.IsDisplayClass() && lambdaDisplayClasses.Contains((i.Operand as FieldReference).DeclaringType))
                     .ToArray();
-            
+
+            // Find instructions that are we want to ignore when constructing captured variables
+            var permittedCapturingInstructions = permittedCapturingInstructionsGenerator(methodsToClone);
+
             // Walk through instructions that use a captured variable and try to construct list of CapturedVariableDescriptions (old and new fields)
             foreach (var instructionThatLoadsOrStoresVariableInDisplayClass in instructionsThatLoadsOrStoresVariableInDisplayClass)
             {
+                // We need to ignore cases where we are permitted to capture (generally for a method that we are going to stub out later)
+                if (permittedCapturingInstructions.Contains(instructionThatLoadsOrStoresVariableInDisplayClass))
+                    continue;
+                
                 var oldField = instructionThatLoadsOrStoresVariableInDisplayClass.Operand as FieldReference;
                 if (capturedVariables.ContainsKey(oldField))
                     continue;
-                
+
                 var oldFields = new List<FieldReference>();
                 oldFields.Add(oldField);
                 
                 var containingMethod = methodsToClone.Single(m => m.Body.Instructions.Contains(instructionThatLoadsOrStoresVariableInDisplayClass));
-                var initialLdFldInstruction = CecilHelpers.FindInstructionThatPushedArg(containingMethod, 0, instructionThatLoadsOrStoresVariableInDisplayClass);
+                var initialLdFldInstruction = FindInstructionThatPushedArg(containingMethod, 0, instructionThatLoadsOrStoresVariableInDisplayClass);
                 foreach (var instruction in WalkBackLdFldInstructionsToLdarg0(containingMethod, initialLdFldInstruction))
                 {
                     var field = instruction.Operand as FieldReference;
@@ -156,7 +166,7 @@ namespace Unity.Entities.CodeGen
             foreach (var instructionThatLoadOrStoreCapturedVariable in instructionsThatLoadOrStoreCapturedVariable)
             {
                 var containingMethod = methodsToClone.Single(m => m.Body.Instructions.Contains(instructionThatLoadOrStoreCapturedVariable));
-                var initialLdFldInstruction = CecilHelpers.FindInstructionThatPushedArg(containingMethod, 0, instructionThatLoadOrStoreCapturedVariable);
+                var initialLdFldInstruction = FindInstructionThatPushedArg(containingMethod, 0, instructionThatLoadOrStoreCapturedVariable);
                 foreach (var instruction in WalkBackLdFldInstructionsToLdarg0(containingMethod, initialLdFldInstruction))
                 {
                     instruction.MakeNOP();
@@ -170,7 +180,7 @@ namespace Unity.Entities.CodeGen
 
             var clonedMethods = methodsToClone.ToDictionary(m => m, m =>
                 {
-                    var clonedMethod = new MethodDefinition(m == executeMethod ? newMethodName : m.Name, MethodAttributes.Public, m.ReturnType)
+                var clonedMethod = new MethodDefinition(m == executeMethod ? newMethodName : m.Name, m.Attributes, m.ReturnType)
                             {HasThis = m.HasThis, DeclaringType = targetType};
                     clonedMethod.DebugInformation.Scope = m.DebugInformation.Scope;
                     
@@ -250,6 +260,14 @@ namespace Unity.Entities.CodeGen
                 var newDebugInfo = methodDefinition.DebugInformation;
                 foreach (var seq in oldDebugInfo.SequencePoints)
                     newDebugInfo.SequencePoints.Add(seq);
+                
+                // Need to clear variables and sequence points in old method or VS debugger gets confused.
+                // It is also only safe to clear the execute method and not other called methods (fortunately issue only seems to occur in lambda).
+                if (methodToClone == executeMethod)
+                {
+                    oldDebugInfo.Scope = null;
+                    oldDebugInfo.SequencePoints.Clear();
+                }
 
                 // For all instructions that point to another instruction (like branches), make sure we patch those instructions to the new ones too.
                 foreach (var newInstruction in oldToNewInstructions.Values)
@@ -263,7 +281,6 @@ namespace Unity.Entities.CodeGen
 
             return (clonedMethods.Values.ToArray(), capturedVariables);
         }
-
 
         public static void EraseMethodInvocationFromInstructions(ILProcessor ilProcessor, Instruction callInstruction)
         {
@@ -285,7 +302,7 @@ namespace Unity.Entities.CodeGen
                 if (instructionThatPushedArg == null)
                     continue;
 
-                if (InstructionExtensions.IsInvocation(instructionThatPushedArg))
+                if (InstructionExtensions.IsInvocation(instructionThatPushedArg, out _))
                     continue;
 
                 var pushDelta = InstructionExtensions.GetPushDelta(instructionThatPushedArg);
@@ -348,7 +365,6 @@ namespace Unity.Entities.CodeGen
                     i.MakeNOP();
                 Instructions.Last().OpCode = OpCodes.Ldnull;
             }
-
 
             public void RewriteToKeepDisplayClassOnEvaluationStack()
             {
@@ -603,13 +619,15 @@ namespace Unity.Entities.CodeGen
         {
             foundSoFar = foundSoFar ?? new HashSet<string>();
 
-            var usedInThisMethod = method.Body.Instructions.Where(i=>i.IsInvocation()).Select(i => i.Operand).OfType<MethodReference>().Where(mr => mr.DeclaringType.TypeReferenceEquals(method.DeclaringType));
+            var usedInThisMethod = method.Body.Instructions.Where(i => i.IsInvocation(out _)).Select(i => i.Operand).OfType<MethodReference>().Where(
+                mr => mr.DeclaringType.TypeReferenceEquals(method.DeclaringType) && mr.HasThis);
 
             foreach (var usedMethod in usedInThisMethod)
             {
                 if (foundSoFar.Contains(usedMethod.FullName))
                     continue;
                 foundSoFar.Add(usedMethod.FullName);
+
                 var usedMethodResolved = usedMethod.Resolve();
                 yield return usedMethodResolved;
 
@@ -617,8 +635,6 @@ namespace Unity.Entities.CodeGen
                     yield return used;
             }
         }
-
-        static readonly string _universalDelegatesNamespace = nameof(Unity) + "." + nameof(Unity.Entities) + "." + nameof(Unity.Entities.UniversalDelegates);
 
         public static bool AllDelegatesAreGuaranteedNotToOutliveMethodFor(MethodDefinition methodToAnalyze)
         {
@@ -639,21 +655,21 @@ namespace Unity.Entities.CodeGen
                 if (mr.Parameters.Count != 2)
                     continue;
 
-                //if this delegate is one of our UniversalDelegates we'll assume we're cool. This is not waterproof, as you could imagine a situation where someone
-                //makes an instance of our delegate manually, and intentionally leaks that. We'll consider that scenario near-malice for now, and assume that the UniversalDelegates
-                //are exclusively used as arguments for lambda jobs that do not leak.
-                if (mr.DeclaringType.Namespace == _universalDelegatesNamespace)
+                if (mr.DeclaringType.Name == nameof(LambdaJobChunkDescriptionConstructionMethods.JobChunkDelegate) && mr.DeclaringType.DeclaringType?.Name == nameof(LambdaJobChunkDescriptionConstructionMethods))
                     continue;
 
-                if (mr.DeclaringType.Name == typeof(LambdaJobChunkDescriptionConstructionMethods.JobChunkDelegate).Name && mr.DeclaringType.DeclaringType?.Name == nameof(LambdaJobChunkDescriptionConstructionMethods))
+                if (mr.DeclaringType.Name == nameof(LambdaSingleJobDescriptionConstructionMethods.WithCodeAction) && mr.DeclaringType.DeclaringType?.Name == nameof(LambdaSingleJobDescriptionConstructionMethods))
                     continue;
                 
-                if (mr.DeclaringType.Name == typeof(LambdaSimpleJobDescriptionConstructionMethods.WithCodeAction).Name && mr.DeclaringType.DeclaringType?.Name == nameof(LambdaSimpleJobDescriptionConstructionMethods))
-                    continue;
-
                 //ok, it walks like a delegate constructor invocation, let's see if it talks like one:
                 var constructedType = mr.DeclaringType.Resolve();
-                if (constructedType.BaseType.Name == nameof(MulticastDelegate))
+                
+                if (constructedType.BaseType.Name != nameof(MulticastDelegate)) 
+                    continue;
+                
+                if (constructedType.CustomAttributes.Any(c => c.Constructor.DeclaringType.Name == nameof(EntitiesForEachCompatibleAttribute)))
+                    continue;
+
                     return false;
             }
 
@@ -753,7 +769,7 @@ namespace Unity.Entities.CodeGen
         }
 
         public static Instruction FindInstructionThatPushedArg(MethodDefinition containingMethod, int argNumber,
-            Instruction callInstructionsWhoseArgumentsWeWantToFind)
+            Instruction callInstructionsWhoseArgumentsWeWantToFind, bool breakWhenBranchDetected = false)
         {
             containingMethod.Body.EnsurePreviousAndNextAreSet();
 
@@ -772,13 +788,16 @@ namespace Unity.Entities.CodeGen
                 var result = CecilHelpers.MatchesDelegateProducingPattern(containingMethod, cursor, CecilHelpers.DelegateProducingPattern.MatchSide.End);
                 if (result != null)
                 {
-                    //so we are crawling backwards through isntructions.  if we find a "this is roslyn caching a delegate" sequence,
+                    //so we are crawling backwards through instructions.  if we find a "this is roslyn caching a delegate" sequence,
                     //we're going to pretend it is a single instruction, that pushes the delegate on the stack, and pops nothing.
                     cursor = result.Instructions.First();
                     pushAmount = 1;
                     popAmount = 0;
-                } else if (cursor.IsBranch())
+                }
+                else if (cursor.IsBranch())
                 {
+                    if (breakWhenBranchDetected)
+                        return null;
                     var target = (Instruction) cursor.Operand;
                     if (!seenInstructions.Contains(target))
                     {
@@ -817,7 +836,7 @@ namespace Unity.Entities.CodeGen
             return true;
         }
 
-        public static MethodDefinition AddMethodImplementingInterfaceMethod(ModuleDefinition module, TypeDefinition type, System.Reflection.MethodInfo interfaceMethod)
+        public static MethodDefinition AddMethodImplementingInterfaceMethod(ModuleDefinition module, TypeDefinition type, MethodInfo interfaceMethod)
         {
             var interfaceMethodReference = module.ImportReference(interfaceMethod);
             var newMethod = new MethodDefinition(interfaceMethodReference.Name,
@@ -858,6 +877,7 @@ namespace Unity.Entities.CodeGen
             var preserveAttributeCtor = moduleDef.ImportReference(typeof(PreserveAttribute).GetConstructor(Type.EmptyTypes));
             typeDef.CustomAttributes.Add(new CustomAttribute(preserveAttributeCtor));
         }
+
 #endif
     }
 }

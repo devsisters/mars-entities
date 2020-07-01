@@ -49,7 +49,6 @@ namespace Unity.Entities.Tests
         }
 
         [Test]
-        [StandaloneFixme]
         public void AddRemoveSharedComponentWithGroupWorks()
         {
             var entity1 = m_Manager.CreateEntity(typeof(EcsTestData));
@@ -80,7 +79,6 @@ namespace Unity.Entities.Tests
         }
 
         [Test]
-        [StandaloneFixme] // ISharedComponentData
         public void AddRemoveAnyComponentWithGroupWorksWithVariousTypes()
         {
             var componentTypes = new ComponentType[] { typeof(EcsTestTag), typeof(EcsTestData4), ComponentType.ChunkComponent<EcsTestData4>(), typeof(EcsTestSharedComp) };
@@ -100,7 +98,7 @@ namespace Unity.Entities.Tests
                 var group1 = m_Manager.CreateEntityQuery(ComponentType.ReadWrite<EcsTestData>());
 
                 m_Manager.AddComponent(group1, type);
-                
+
 
                 Assert.IsTrue(m_Manager.HasComponent(entity1, type));
                 Assert.IsTrue(m_Manager.HasComponent(entity2, type));
@@ -129,11 +127,13 @@ namespace Unity.Entities.Tests
         }
 
         [Test]
-        [StandaloneFixme] // ISharedComponentData
+        [IgnoreInPortableTests("intermittent crash (likely race condition)")]
         public void RemoveAnyComponentWithGroupIgnoresChunksThatDontHaveTheComponent()
         {
-            var componentTypes = new ComponentType[] {
-                typeof(EcsTestTag), typeof(EcsTestData4), ComponentType.ChunkComponent<EcsTestData4>(), typeof(EcsTestSharedComp) };
+            var componentTypes = new ComponentType[]
+            {
+                typeof(EcsTestTag), typeof(EcsTestData4), ComponentType.ChunkComponent<EcsTestData4>(), typeof(EcsTestSharedComp)
+            };
 
             foreach (var type in componentTypes)
             {
@@ -174,20 +174,19 @@ namespace Unity.Entities.Tests
 
         uint GetComponentDataVersion<T>(Entity e) where T :
 #if UNITY_DISABLE_MANAGED_COMPONENTS
-            struct, 
+        struct,
 #endif
-            IComponentData
+        IComponentData
         {
-            return m_Manager.GetChunk(e).GetComponentVersion(m_Manager.GetArchetypeChunkComponentType<T>(true));
+            return m_Manager.GetChunk(e).GetChangeVersion(m_Manager.GetArchetypeChunkComponentType<T>(true));
         }
 
         uint GetSharedComponentDataVersion<T>(Entity e) where T : struct, ISharedComponentData
         {
-            return m_Manager.GetChunk(e).GetComponentVersion(m_Manager.GetArchetypeChunkSharedComponentType<T>());
+            return m_Manager.GetChunk(e).GetChangeVersion(m_Manager.GetArchetypeChunkSharedComponentType<T>());
         }
 
         [Test]
-        [StandaloneFixme] // Don't know why fails?
         public void AddRemoveComponentWithGroupPreservesChangeVersions()
         {
             m_ManagerDebug.SetGlobalSystemVersion(10);
@@ -246,7 +245,9 @@ namespace Unity.Entities.Tests
 
             var group1 = m_Manager.CreateEntityQuery(ComponentType.ReadWrite<EcsTestData>());
 
+            m_ManagerDebug.CheckInternalConsistency();
             m_Manager.AddChunkComponentData(group1, new EcsTestManagedComponent() { value = "SomeString" });
+            m_ManagerDebug.CheckInternalConsistency();
 
             Assert.IsTrue(m_Manager.HasComponent(entity1, ComponentType.ChunkComponent<EcsTestManagedComponent>()));
             var val1 = m_Manager.GetChunkComponentData<EcsTestManagedComponent>(entity1).value;
@@ -279,12 +280,13 @@ namespace Unity.Entities.Tests
         }
 
         [Test]
-        [StandaloneFixme] // ISharedComponentData
         public void AddRemoveAnyComponentWithGroupWorksWithVariousTypes_ManagedComponents()
         {
-            var componentTypes = new ComponentType[] {
+            var componentTypes = new ComponentType[]
+            {
                 typeof(EcsTestTag), typeof(EcsTestData4), ComponentType.ChunkComponent<EcsTestData4>(), typeof(EcsTestSharedComp),
-                typeof(EcsTestManagedComponent), ComponentType.ChunkComponent<EcsTestManagedComponent>() };
+                typeof(EcsTestManagedComponent), ComponentType.ChunkComponent<EcsTestManagedComponent>()
+            };
 
             foreach (var type in componentTypes)
             {
@@ -329,12 +331,14 @@ namespace Unity.Entities.Tests
         }
 
         [Test]
-        [StandaloneFixme] // ISharedComponentData
+        [IgnoreInPortableTests("intermittent crash (likely race condition)")]
         public void RemoveAnyComponentWithGroupIgnoresChunksThatDontHaveTheComponent_ManagedComponents()
         {
-            var componentTypes = new ComponentType[] {
+            var componentTypes = new ComponentType[]
+            {
                 typeof(EcsTestTag), typeof(EcsTestData4), ComponentType.ChunkComponent<EcsTestData4>(), typeof(EcsTestSharedComp),
-                typeof(EcsTestManagedComponent), ComponentType.ChunkComponent<EcsTestManagedComponent>() };
+                typeof(EcsTestManagedComponent), ComponentType.ChunkComponent<EcsTestManagedComponent>()
+            };
 
             foreach (var type in componentTypes)
             {
@@ -374,7 +378,7 @@ namespace Unity.Entities.Tests
         }
 
         [Test]
-        [StandaloneFixme] // Don't know why fails?
+        [DotsRuntimeFixme] // ISharedComponentData
         public void AddRemoveComponentWithGroupPreservesChangeVersions_ManagedComponents()
         {
             m_ManagerDebug.SetGlobalSystemVersion(10);
@@ -440,6 +444,7 @@ namespace Unity.Entities.Tests
             Assert.AreEqual(10, GetComponentDataVersion<EcsTestManagedComponent>(entity4));
             Assert.AreEqual(10, GetComponentDataVersion<EcsTestManagedComponent>(entity5));
         }
+
 #endif
     }
 }

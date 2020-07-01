@@ -1,10 +1,9 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using Unity.Collections;
 using Unity.Entities;
 using Unity.Mathematics;
 using UnityEditor;
-using UnityEditor.Experimental.SceneManagement;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -34,7 +33,7 @@ namespace Unity.Scenes.Editor
                     return child;
                 if (child.localRotation != Quaternion.identity)
                     return child;
-                if (child.localScale!= Vector3.one)
+                if (child.localScale != Vector3.one)
                     return child;
 
                 child = child.parent;
@@ -56,7 +55,7 @@ namespace Unity.Scenes.Editor
 
         public static void CloseSceneWithoutSaving(params SubScene[] scenes)
         {
-            foreach(var scene in scenes)
+            foreach (var scene in scenes)
                 EditorSceneManager.CloseScene(scene.EditingScene, true);
         }
 
@@ -68,15 +67,19 @@ namespace Unity.Scenes.Editor
 
         static NativeArray<Entity> GetActiveWorldSections(World world, Hash128 sceneGUID)
         {
-            var sceneSystem = world?.GetExistingSystem<SceneSystem>();
-            var entities = world?.EntityManager;
+            if (world == null || !world.IsCreated) return default;
+
+            var sceneSystem = world.GetExistingSystem<SceneSystem>();
             if (sceneSystem == null)
                 return default;
+
+            var entities = world.EntityManager;
 
             var sceneEntity = sceneSystem.GetSceneEntity(sceneGUID);
 
             if (!entities.HasComponent<ResolvedSectionEntity>(sceneEntity))
                 return default;
+
             return entities.GetBuffer<ResolvedSectionEntity>(sceneEntity).Reinterpret<Entity>().AsNativeArray();
         }
 
@@ -88,7 +91,7 @@ namespace Unity.Scenes.Editor
             {
                 foreach (var section in GetActiveWorldSections(World.DefaultGameObjectInjectionWorld, scene.SceneGUID))
                 {
-                    var name = scene.SceneAsset.name;
+                    var name = scene.SceneAsset != null ? scene.SceneAsset.name : "Missing Scene Asset";
                     if (World.DefaultGameObjectInjectionWorld.EntityManager.HasComponent<SceneSectionData>(section))
                     {
                         var sectionIndex = World.DefaultGameObjectInjectionWorld.EntityManager.GetComponentData<SceneSectionData>(section).SubSectionIndex;
@@ -107,6 +110,23 @@ namespace Unity.Scenes.Editor
             return loadables.ToArray();
         }
 
+        public static void ForceReimport(SubScene[] scenes)
+        {
+            foreach (var scene in scenes)
+            {
+                foreach (var world in World.All)
+                {
+                    var sceneSystem = world.GetExistingSystem<SceneSystem>();
+                    if (sceneSystem != null)
+                    {
+                        var guid = SceneWithBuildConfigurationGUIDs.Dirty(scene.SceneGUID, sceneSystem.BuildConfigurationGUID);
+                        // Ignoring return as this is just being used to force a reimport, we don't actually care about the hash result
+                        AssetDatabaseCompatibility.GetArtifactHash(guid.ToString(), EntityScenesPaths.SubSceneImporterType, ImportMode.Asynchronous);
+                    }
+                }
+            }
+        }
+
         public static bool IsEditingAll(SubScene[] scenes)
         {
             foreach (var scene in scenes)
@@ -118,17 +138,12 @@ namespace Unity.Scenes.Editor
             return true;
         }
 
-        public static bool CanEditScene(SubScene scene)
+        public static bool CanEditScene(SubScene subScene)
         {
-#if UNITY_EDITOR
-            // Disallow editing when in prefab edit mode
-            if (PrefabStageUtility.GetPrefabStage(scene.gameObject) != null)
+            if (!subScene.CanBeLoaded())
                 return false;
-            if (!scene.isActiveAndEnabled)
-                return false;
-#endif
 
-            return !scene.IsLoaded;
+            return !subScene.IsLoaded;
         }
 
         public static bool IsLoaded(SubScene[] scenes)
@@ -226,7 +241,10 @@ namespace Unity.Scenes.Editor
         {
             MinMaxAABB bounds = MinMaxAABB.Empty;
 
-            var entities = world?.EntityManager;
+            if (world == null)
+                return bounds;
+
+            var entities = world.EntityManager;
             foreach (SubScene subScene in targets)
             {
                 foreach (var section in GetActiveWorldSections(World.DefaultGameObjectInjectionWorld, subScene.SceneGUID))
@@ -244,7 +262,11 @@ namespace Unity.Scenes.Editor
         {
             var isEditing = scene.IsLoaded;
 
-            var entities = World.DefaultGameObjectInjectionWorld?.EntityManager;
+            var world = World.DefaultGameObjectInjectionWorld;
+            if (world == null)
+                return;
+
+            var entities = world.EntityManager;
             foreach (var section in GetActiveWorldSections(World.DefaultGameObjectInjectionWorld, scene.SceneGUID))
             {
                 if (!entities.HasComponent<SceneBoundingVolume>(section))
@@ -287,7 +309,7 @@ namespace Unity.Scenes.Editor
                 LiveLinkModeChanged();
             }
         }
-        
+
         public static bool LiveLinkShowGameStateInSceneView
         {
             get
@@ -305,6 +327,6 @@ namespace Unity.Scenes.Editor
             }
         }
 
-        public static event Action LiveLinkModeChanged = delegate { };
+        public static event Action LiveLinkModeChanged = delegate {};
     }
 }

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -73,7 +73,6 @@ namespace Unity.Entities
                 Padding = 0
             };
         }
-
 
         internal static BlobAssetBatch* CreateFromMemory(void* buffer, int expectedTotalDataSize)
         {
@@ -220,7 +219,6 @@ namespace Unity.Entities
                 throw new InvalidOperationException("The BlobAssetReference is not valid. Likely it has already been unloaded or released.");
         }
 
-        
         [Conditional("ENABLE_UNITY_COLLECTIONS_CHECKS")]
         public void ValidateNotNull()
         {
@@ -265,6 +263,9 @@ namespace Unity.Entities
     public unsafe struct BlobAssetReference<T> : IDisposable, IEquatable<BlobAssetReference<T>> 
         where T : struct
     {
+        #if !NET_DOTS
+        [Properties.CreateProperty]
+        #endif
         internal BlobAssetReferenceData m_data;
         /// <summary>
         /// Reports whether this instance references a valid blob asset.
@@ -285,10 +286,6 @@ namespace Unity.Entities
             m_data.ValidateAllowNull();
             return m_data.m_Ptr;
         }
-
-        [Obsolete("Use Dispose instead. Release will be (RemovedAfter 2020-04-09). (UnityUpgradable) -> Dispose()")]
-        public void Release() => Dispose();
-
 
         /// <summary>
         /// Destroys the referenced blob asset and frees its memory.
@@ -399,7 +396,13 @@ namespace Unity.Entities
         /// <returns>A bool if the read was successful or not.</returns>
         public static bool TryRead(string path, int version, out BlobAssetReference<T> result)
         {
-            using (var binaryReader = new StreamBinaryReader(path, UnsafeUtility.SizeOf<T>() + sizeof(int)))
+            if (string.IsNullOrEmpty(path))
+            {
+                result = default;
+                return false;
+            }
+
+            using (var binaryReader = new StreamBinaryReader(path))
             {
                 var storedVersion = binaryReader.ReadInt();
                 if (storedVersion != version)
@@ -412,32 +415,6 @@ namespace Unity.Entities
                 return true;
             }
         }
-        
-        /// <summary>
-        /// Reads bytes from a buffer, validates the expected serialized version, and deserializes them into a new blob asset.
-        /// </summary>
-        /// <param name="buffer">Byte array of buffer</param>
-        /// <param name="version">Expected version number of the blob data.</param>
-        /// <param name="result">The resulting BlobAssetReference if the data was read successful.</param>
-        /// <returns>A bool if the read was successful or not.</returns>
-        public static bool TryRead(byte[] buffer, int version, out BlobAssetReference<T> result)
-        {
-            fixed (byte* fixedBuffer = buffer)
-            {
-                using (var binaryReader = new MemoryBinaryReader(fixedBuffer))
-                {
-                    var storedVersion = binaryReader.ReadInt();
-                    if (storedVersion != version)
-                    {
-                        result = default;
-                        return false;
-                    }
-
-                    result = binaryReader.Read<T>();
-                    return true;
-                }
-            }
-        }
 
         /// <summary>
         /// Writes the blob data to a path with serialized version.
@@ -448,12 +425,15 @@ namespace Unity.Entities
         public static void Write(BlobBuilder builder, string path, int verison)
         {
             using (var asset = builder.CreateBlobAssetReference<T>(Allocator.TempJob))
-            using (var writer = new StreamBinaryWriter(path))
             {
-                writer.Write(verison);
-                writer.Write(asset);
+                using (var writer = new StreamBinaryWriter(path))
+                {
+                    writer.Write(verison);
+                    writer.Write(asset);
+                }
             }
         }
+
 #endif
 
         /// <summary>

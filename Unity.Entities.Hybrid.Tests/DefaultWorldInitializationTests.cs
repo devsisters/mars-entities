@@ -1,34 +1,96 @@
-﻿using NUnit.Framework;
-using UnityEngine.TestTools;
+using System;
+using System.Linq;
+using NUnit.Framework;
+using Unity.Entities.Hybrid.Tests;
 
 namespace Unity.Entities.Tests
 {
     public class DefaultWorldInitializationTests
     {
-        private World m_PreviousWorld;
+        World m_World;
+        TestWithCustomDefaultGameObjectInjectionWorld m_CustomInjectionWorld;
 
-        [SetUp]
+        [OneTimeSetUp]
         public void Setup()
         {
-            m_PreviousWorld = World.DefaultGameObjectInjectionWorld;
+            m_CustomInjectionWorld.Setup();
+            DefaultWorldInitialization.Initialize("TestWorld", false);
+            m_World = World.DefaultGameObjectInjectionWorld;
+        }
+
+        [OneTimeTearDown]
+        public void TearDown()
+        {
+            m_CustomInjectionWorld.TearDown();
         }
 
         [Test]
-        public void Initialize_ShouldLogNothing()
+        public void Systems_CalledViaGetOrCreateSystem_AreCreated()
         {
-            DefaultWorldInitialization.Initialize("Test World", true);
-
-            LogAssert.NoUnexpectedReceived();
+            m_World.GetOrCreateSystem<SystemWithGetOrCreate>();
+            Assert.IsNotNull(m_World.GetExistingSystem<GetOrCreateTargetSystem>(), $"{nameof(GetOrCreateTargetSystem)} was not automatically created");
         }
 
-        [TearDown]
-        public void TearDown()
+        [Test]
+        public void Systems_WithCyclicReferences_AreAllCreated()
         {
-            World.DefaultGameObjectInjectionWorld.Dispose();
-            World.DefaultGameObjectInjectionWorld = null;
+            m_World.GetOrCreateSystem<CyclicReferenceSystemA>();
+            Assert.IsNotNull(m_World.GetExistingSystem<CyclicReferenceSystemA>(), nameof(CyclicReferenceSystemA) + " was not created");
+            Assert.IsNotNull(m_World.GetExistingSystem<CyclicReferenceSystemB>(), nameof(CyclicReferenceSystemB) + " was not created");
+            Assert.IsNotNull(m_World.GetExistingSystem<CyclicReferenceSystemC>(), nameof(CyclicReferenceSystemC) + " was not created");
+        }
 
-            World.DefaultGameObjectInjectionWorld = m_PreviousWorld;
-            ScriptBehaviourUpdateOrder.UpdatePlayerLoop(null);
+        class SystemWithGetOrCreate : SystemBase
+        {
+            protected override void OnCreate()
+            {
+                base.OnCreate();
+                World.GetOrCreateSystem<GetOrCreateTargetSystem>();
+            }
+
+            protected override void OnUpdate()
+            {
+            }
+        }
+
+        class GetOrCreateTargetSystem : SystemBase
+        {
+            protected override void OnUpdate()
+            {
+            }
+        }
+
+        class CyclicReferenceSystemA : SystemBase
+        {
+            protected override void OnCreate()
+            {
+                base.OnCreate();
+                World.GetOrCreateSystem<CyclicReferenceSystemB>();
+            }
+
+            protected override void OnUpdate() {}
+        }
+
+        class CyclicReferenceSystemB : SystemBase
+        {
+            protected override void OnCreate()
+            {
+                base.OnCreate();
+                World.GetOrCreateSystem<CyclicReferenceSystemC>();
+            }
+
+            protected override void OnUpdate() {}
+        }
+
+        class CyclicReferenceSystemC : SystemBase
+        {
+            protected override void OnCreate()
+            {
+                base.OnCreate();
+                World.GetOrCreateSystem<CyclicReferenceSystemA>();
+            }
+
+            protected override void OnUpdate() {}
         }
     }
 }

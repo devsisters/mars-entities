@@ -1,22 +1,25 @@
-﻿using NUnit.Framework;
+using NUnit.Framework;
 using UnityEngine;
 
 namespace Unity.Entities.Tests
 {
+#pragma warning disable 618 // remove once ComponentDataProxyBase is removed
     [DisallowMultipleComponent]
     [AddComponentMenu("")]
-    public class EcsFooTestProxy : ComponentDataProxy<EcsFooTest> { }
-    
-    [DisallowMultipleComponent]
-    [AddComponentMenu("")]
-    public class EcsTestProxy : ComponentDataProxy<EcsTestData> { }
+    public class EcsFooTestProxy : ComponentDataProxy<EcsFooTest> {}
 
-    class EntityManagerTests : ECSTestsFixture
+    [DisallowMultipleComponent]
+    [AddComponentMenu("")]
+    public class EcsTestProxy : ComponentDataProxy<EcsTestData> {}
+#pragma warning restore 618
+
+    class EntityManagerTests : HybridRuntimeTestFixture
     {
         [Test]
         public void GetComponentObjectReturnsTheCorrectType()
         {
             var go = new GameObject();
+            MarkForAutoDestructionAfterTest(go);
             go.AddComponent<EcsTestProxy>();
 
             var component = m_Manager.GetComponentObject<Transform>(go.GetComponent<GameObjectEntity>().Entity);
@@ -30,6 +33,7 @@ namespace Unity.Entities.Tests
         public void GetComponentObjectThrowsIfComponentDoesNotExist()
         {
             var go = new GameObject();
+            MarkForAutoDestructionAfterTest(go);
             go.AddComponent<EcsTestProxy>();
 
             Assert.Throws<System.ArgumentException>(() => m_Manager.GetComponentObject<Rigidbody>(go.GetComponent<GameObjectEntity>().Entity));
@@ -41,7 +45,7 @@ namespace Unity.Entities.Tests
             var types = new ComponentType[]
             {
                 typeof(EcsTestData),
-                typeof(EcsTestMonoBehaviourComponent),
+                typeof(ConversionTestHybridComponent),
 #if !UNITY_DISABLE_MANAGED_COMPONENTS
                 typeof(EcsTestManagedComponent)
 #endif

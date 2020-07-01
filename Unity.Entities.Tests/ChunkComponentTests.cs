@@ -17,11 +17,11 @@ namespace Unity.Entities.Tests
         public float3 boundsMin;
         public float3 boundsMax;
     }
-    
+
     struct SystemStateChunkComponent : ISystemStateComponentData
     {
     }
-    
+
     public class ChunkComponentTests : ECSTestsFixture
     {
         [Test]
@@ -39,7 +39,7 @@ namespace Unity.Entities.Tests
             var chunkComponentType = m_Manager.GetArchetypeChunkComponentType<EcsTestData2>(false);
             var chunk = m_Manager.GetChunk(entity);
 
-            Assert.That(chunk.m_Chunk->metaChunkEntity, Is.EqualTo(Entity.Null));
+            Assert.AreEqual(chunk.m_Chunk->metaChunkEntity, Entity.Null);
             Assert.Throws<ArgumentException>(() => chunk.SetChunkComponentData(chunkComponentType, new EcsTestData2(12)));
             Assert.Throws<ArgumentException>(() => chunk.GetChunkComponentData(chunkComponentType));
         }
@@ -51,9 +51,9 @@ namespace Unity.Entities.Tests
             var chunkComponentType = m_Manager.GetArchetypeChunkComponentType<EcsTestData2>(false);
             var chunk = m_Manager.GetChunk(entity);
 
-            Assert.That(chunk.m_Chunk->metaChunkEntity, Is.Not.EqualTo(Entity.Null));
+            Assert.AreNotEqual(chunk.m_Chunk->metaChunkEntity, Entity.Null);
             Assert.Throws<ArgumentException>(() => chunk.GetChunkComponentData(chunkComponentType));
-            Assert.Throws<ArgumentException>(() => chunk.SetChunkComponentData(chunkComponentType,new EcsTestData2(12)));
+            Assert.Throws<ArgumentException>(() => chunk.SetChunkComponentData(chunkComponentType, new EcsTestData2(12)));
         }
 
         [Test]
@@ -61,7 +61,7 @@ namespace Unity.Entities.Tests
         {
             var entity = m_Manager.CreateEntity(ComponentType.ChunkComponent<EcsTestData>());
 
-            m_Manager.SetChunkComponentData(m_Manager.GetChunk(entity), new EcsTestData{value = 7});
+            m_Manager.SetChunkComponentData(m_Manager.GetChunk(entity), new EcsTestData {value = 7});
             Assert.IsTrue(m_Manager.HasComponent(entity, ComponentType.ChunkComponent<EcsTestData>()));
             var val0 = m_Manager.GetChunkComponentData<EcsTestData>(entity).value;
             Assert.AreEqual(7, val0);
@@ -158,9 +158,9 @@ namespace Unity.Entities.Tests
         public void ProcessMetaChunkComponent()
         {
             var entity0 = m_Manager.CreateEntity(typeof(BoundsComponent), ComponentType.ChunkComponent<ChunkBoundsComponent>());
-            m_Manager.SetComponentData(entity0, new BoundsComponent{boundsMin = new float3(-10,-10,-10), boundsMax = new float3(0,0,0)});
+            m_Manager.SetComponentData(entity0, new BoundsComponent {boundsMin = new float3(-10, -10, -10), boundsMax = new float3(0, 0, 0)});
             var entity1 = m_Manager.CreateEntity(typeof(BoundsComponent), ComponentType.ChunkComponent<ChunkBoundsComponent>());
-            m_Manager.SetComponentData(entity1, new BoundsComponent{boundsMin = new float3(0,0,0), boundsMax = new float3(10,10,10)});
+            m_Manager.SetComponentData(entity1, new BoundsComponent {boundsMin = new float3(0, 0, 0), boundsMax = new float3(10, 10, 10)});
             var metaGroup = m_Manager.CreateEntityQuery(typeof(ChunkBoundsComponent), typeof(ChunkHeader));
             var metaBoundsCount = metaGroup.CalculateEntityCount();
             var metaChunkHeaders = metaGroup.ToComponentDataArray<ChunkHeader>(Allocator.TempJob);
@@ -182,9 +182,9 @@ namespace Unity.Entities.Tests
                 Assert.AreEqual(curBounds, boundsChunk.GetChunkComponentData(chunkBoundsType));
             }
             var val = m_Manager.GetChunkComponentData<ChunkBoundsComponent>(entity0);
-            Assert.AreEqual(new float3(-10,-10,-10), val.boundsMin);
-            Assert.AreEqual(new float3(10,10,10), val.boundsMax);
-            
+            Assert.AreEqual(new float3(-10, -10, -10), val.boundsMin);
+            Assert.AreEqual(new float3(10, 10, 10), val.boundsMax);
+
             metaChunkHeaders.Dispose();
         }
 
@@ -192,10 +192,11 @@ namespace Unity.Entities.Tests
         [UpdateInGroup(typeof(PresentationSystemGroup))]
         private class ChunkBoundsUpdateSystem : JobComponentSystem
         {
+#pragma warning disable 618
             struct UpdateChunkBoundsJob : IJobForEach<ChunkBoundsComponent, ChunkHeader>
             {
                 [ReadOnly] public ArchetypeChunkComponentType<BoundsComponent> chunkComponentType;
-                
+
                 public void Execute(ref ChunkBoundsComponent chunkBounds, [ReadOnly] ref ChunkHeader chunkHeader)
                 {
                     var curBounds = new ChunkBoundsComponent { boundsMin = new float3(1000, 1000, 1000), boundsMax = new float3(-1000, -1000, -1000)};
@@ -216,24 +217,26 @@ namespace Unity.Entities.Tests
                 return job.Schedule(this, inputDeps);
             }
         }
+#pragma warning restore 618
 
         [Test]
         public void SystemProcessMetaChunkComponent()
         {
-            var chunkBoundsUpdateSystem = World.GetOrCreateSystem<ChunkBoundsUpdateSystem> ();
+            var chunkBoundsUpdateSystem = World.GetOrCreateSystem<ChunkBoundsUpdateSystem>();
 
             var entity0 = m_Manager.CreateEntity(typeof(BoundsComponent), ComponentType.ChunkComponent<ChunkBoundsComponent>());
-            m_Manager.SetComponentData(entity0, new BoundsComponent{boundsMin = new float3(-10,-10,-10), boundsMax = new float3(0,0,0)});
+            m_Manager.SetComponentData(entity0, new BoundsComponent {boundsMin = new float3(-10, -10, -10), boundsMax = new float3(0, 0, 0)});
 
             var entity1 = m_Manager.CreateEntity(typeof(BoundsComponent), ComponentType.ChunkComponent<ChunkBoundsComponent>());
-            m_Manager.SetComponentData(entity1, new BoundsComponent{boundsMin = new float3(0,0,0), boundsMax = new float3(10,10,10)});
+            m_Manager.SetComponentData(entity1, new BoundsComponent {boundsMin = new float3(0, 0, 0), boundsMax = new float3(10, 10, 10)});
 
             chunkBoundsUpdateSystem.Update();
 
             var val = m_Manager.GetChunkComponentData<ChunkBoundsComponent>(entity0);
-            Assert.AreEqual(new float3(-10,-10,-10), val.boundsMin);
-            Assert.AreEqual(new float3(10,10,10), val.boundsMax);
+            Assert.AreEqual(new float3(-10, -10, -10), val.boundsMin);
+            Assert.AreEqual(new float3(10, 10, 10), val.boundsMax);
         }
+
 #endif
 
         [Test]
@@ -248,7 +251,7 @@ namespace Unity.Entities.Tests
             Assert.AreEqual(1, group0.CalculateEntityCount());
             Assert.AreEqual(0, group1.CalculateEntityCount());
         }
-        
+
         [Test]
         public void DestroyEntityDestroysMetaChunk()
         {
@@ -257,14 +260,14 @@ namespace Unity.Entities.Tests
             m_Manager.DestroyEntity(entity);
             Assert.IsFalse(m_Manager.Exists(metaEntity));
         }
-        
+
         [Test]
         [Ignore("Fails on last Assert.IsFalse(m_Manager.Exists(metaEntity));")]
         public void SystemStateChunkComponentRemainsUntilRemoved()
         {
             var entity = m_Manager.CreateEntity(ComponentType.ReadWrite<EcsState1>(), ComponentType.ChunkComponent<SystemStateChunkComponent>());
             var metaEntity = m_Manager.Debug.GetMetaChunkEntity(entity);
-            
+
             m_Manager.DestroyEntity(entity);
 
             Assert.IsTrue(m_Manager.HasComponent<EcsState1>(entity));
@@ -291,10 +294,10 @@ namespace Unity.Entities.Tests
         public void NewChunkGetsDefaultChunkComponentValue()
         {
             var entity = m_Manager.CreateEntity
-            (
-                ComponentType.ChunkComponent<EcsTestData>(),
-                ComponentType.ReadWrite<EcsTestSharedComp>()
-            );
+                (
+                    ComponentType.ChunkComponent<EcsTestData>(),
+                    ComponentType.ReadWrite<EcsTestSharedComp>()
+                );
 
             m_Manager.SetSharedComponentData(entity, new EcsTestSharedComp(123));
             m_Manager.SetChunkComponentData(m_Manager.GetChunk(entity), new EcsTestData(123));
@@ -335,7 +338,9 @@ namespace Unity.Entities.Tests
             Assert.AreEqual(chunk0, chunk1);
 
             Assert.IsFalse(m_Manager.HasChunkComponent<EcsTestManagedComponent>(entity0));
+            m_Manager.Debug.CheckInternalConsistency();
             m_Manager.AddChunkComponentData<EcsTestManagedComponent>(entity0);
+            m_Manager.Debug.CheckInternalConsistency();
             Assert.IsTrue(m_Manager.HasChunkComponent<EcsTestManagedComponent>(entity0));
             chunk0 = m_Manager.GetChunk(entity0);
 
@@ -413,10 +418,10 @@ namespace Unity.Entities.Tests
         public void NewChunkGetsDefaultChunkComponentValue_ManagedComponents()
         {
             var entity = m_Manager.CreateEntity
-            (
-                ComponentType.ChunkComponent<EcsTestManagedComponent>(),
-                ComponentType.ReadWrite<EcsTestSharedComp>()
-            );
+                (
+                    ComponentType.ChunkComponent<EcsTestManagedComponent>(),
+                    ComponentType.ReadWrite<EcsTestSharedComp>()
+                );
 
             m_Manager.SetSharedComponentData(entity, new EcsTestSharedComp(123));
             m_Manager.SetChunkComponentData(m_Manager.GetChunk(entity), new EcsTestManagedComponent() { value = "SomeString" });
@@ -429,8 +434,9 @@ namespace Unity.Entities.Tests
             m_Manager.SetSharedComponentData(other, new EcsTestSharedComp(456));
 
             Assert.AreNotEqual(m_Manager.GetChunk(entity), m_Manager.GetChunk(other));
-            Assert.AreEqual(null, m_Manager.GetChunkComponentData<EcsTestManagedComponent>(other));
+            Assert.IsNull(m_Manager.GetChunkComponentData<EcsTestManagedComponent>(other));
         }
+
 #endif
     }
 }

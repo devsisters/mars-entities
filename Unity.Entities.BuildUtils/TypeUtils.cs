@@ -1,12 +1,12 @@
-﻿#if !UNITY_EDITOR
+#if !UNITY_EDITOR
 
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using Mono.Cecil;
-using Unity.IL2CPP.Common;
-using Unity.IL2CPP.ILPreProcessor;
+using Unity.Cecil.Awesome;
+using Unity.Cecil.Awesome.Comparers;
 
 namespace Unity.Entities.BuildUtils
 {
@@ -75,15 +75,18 @@ namespace Unity.Entities.BuildUtils
             }
         }
 
-        private static Dictionary<TypeReference, AlignAndSize>[] ValueTypeAlignment = {
+        private static Dictionary<TypeReference, AlignAndSize>[] ValueTypeAlignment =
+        {
             new Dictionary<TypeReference, AlignAndSize>(new TypeReferenceEqualityComparer()), new Dictionary<TypeReference, AlignAndSize>(new TypeReferenceEqualityComparer())
         };
 
-        private static Dictionary<FieldReference, AlignAndSize>[] StructFieldAlignment = {
+        private static Dictionary<FieldReference, AlignAndSize>[] StructFieldAlignment =
+        {
             new Dictionary<FieldReference, AlignAndSize>(new FieldReferenceComparer()), new Dictionary<FieldReference, AlignAndSize>(new FieldReferenceComparer())
         };
 
-        internal static Dictionary<TypeReference, bool>[] ValueTypeIsComplex = {
+        internal static Dictionary<TypeReference, bool>[] ValueTypeIsComplex =
+        {
             new Dictionary<TypeReference, bool>(new TypeReferenceEqualityComparer()), new Dictionary<TypeReference, bool>(new TypeReferenceEqualityComparer())
         };
 
@@ -137,7 +140,7 @@ namespace Unity.Entities.BuildUtils
             {
                 var sz = ValueTypeAlignment[bits][typeRef];
 
-                if(sz.IsSentinel)
+                if (sz.IsSentinel)
                     throw new ArgumentException($"Type {typeRef} triggered sentinel; recursive value type definition");
 
                 return sz;
@@ -297,26 +300,6 @@ namespace Unity.Entities.BuildUtils
             ValueTypeAlignment[bits].Add(valuetype, new AlignAndSize(highestFieldAlignment, size, 0, typeDef.Fields.Count == 0));
             //Console.WriteLine($"ValueType: {valuetype.Name} ({valuetype.GetType()}) - alignment {highestFieldAlignment} sz {size}");
             ValueTypeIsComplex[bits].Add(valuetype, isComplex);
-        }
-
-        public static void IterateFieldsRecurse(Action<FieldReference, TypeReference> processFunc, TypeReference type)
-        {
-            var typeResolver = TypeResolver.For(type);
-            foreach (var f in type.Resolve().Fields)
-            {
-                var fieldReference = typeResolver.Resolve(f);
-                var fieldType = typeResolver.Resolve(f.FieldType);
-
-                processFunc(fieldReference, fieldType);
-
-                // Excluding statics for recursion covers:
-                // 1) enums which infinitely recurse because the values in the enum are of the same enum type
-                // 2) statics which infinitely recurse themselves (Such as vector3.zero.zero.zero.zero)
-                if (fieldType.IsValueType && !fieldType.IsPrimitive && !f.IsStatic)
-                {
-                    IterateFieldsRecurse(processFunc, fieldType);
-                }
-            }
         }
 
         internal static void GetFieldOffsetsOfRecurse(Func<FieldReference, TypeReference, bool> match, int offset, TypeReference type, List<int> list, int bits)
