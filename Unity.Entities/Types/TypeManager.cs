@@ -683,7 +683,7 @@ namespace Unity.Entities
                 case "Unity.Scenes.Hybrid":
                 case "Unity.Transforms":
                 case "Unity.Transforms.Hybrid":
-                case "VillageExploreModule":
+                case "VillageClusterModule":
                 case "VillageExploreUI":
                 case "WorldStreamerModule":
                     return true;
