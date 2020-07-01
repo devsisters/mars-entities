@@ -47,7 +47,7 @@ namespace Unity.Entities
         // TODO: Very wrong error messages when creating entity with empty ComponentType array?
         public static Entity AddToEntityManager(EntityManager entityManager, GameObject gameObject)
         {
-            GetComponents(gameObject, false, out var types, out var components);
+            GetComponents(gameObject, true, out var types, out var components);
 
             EntityArchetype archetype;
             try
@@ -68,7 +68,7 @@ namespace Unity.Entities
                 throw;
             }
 
-            var entity = CreateEntity(entityManager, archetype, false, components, types);
+            var entity = CreateEntity(entityManager, archetype, components, types);
 
             return entity;
         }
@@ -128,7 +128,7 @@ namespace Unity.Entities
             Assert.AreEqual(t, types.Length);
         }
 
-        static Entity CreateEntity(EntityManager entityManager, EntityArchetype archetype, bool includeGameObjectComponents, IReadOnlyList<Component> components, IReadOnlyList<ComponentType> types)
+        static Entity CreateEntity(EntityManager entityManager, EntityArchetype archetype, IReadOnlyList<Component> components, IReadOnlyList<ComponentType> types)
         {
             var entity = entityManager.CreateEntity(archetype);
             var t = 0;
@@ -143,7 +143,7 @@ namespace Unity.Entities
                     proxy.UpdateComponentData(entityManager, entity);
                     t++;
                 }
-                else if (includeGameObjectComponents)
+                else
                 {
                     entityManager.SetComponentObject(entity, types[t], component);
                     t++;
