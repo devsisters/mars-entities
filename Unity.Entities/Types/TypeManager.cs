@@ -703,9 +703,7 @@ namespace Unity.Entities
 
                 var componentTypeSet = new HashSet<Type>() { typeof(UnityEngine.Transform), typeof(UnityEngine.RectTransform) };
                 var assemblies = AppDomain.CurrentDomain.GetAssemblies();
-                // XXX(jameskim): all-in-one 빌드의 경우, WorldStreamerModule 가 없습니다.
-                if (assemblies.Any(a => a.GetName().Name == "WorldStreamerModule"))
-                    assemblies = assemblies.Where(ShouldIncludeAssembly).ToArray();
+                assemblies = assemblies.Where(ShouldIncludeAssembly).ToArray();
 
                 // Inject types needed for Hybrid
                 UnityEngineObjectType = typeof(UnityEngine.Object);
