@@ -32,7 +32,7 @@ namespace Unity.Entities
         // INTERNAL
         // ----------------------------------------------------------------------------------------------------------
 
-        internal EntityArchetype CreateArchetype(ComponentType* types, int count)
+        public EntityArchetype CreateArchetype(ComponentType* types, int count)
         {
             var access = GetCheckedEntityDataAccess();
             return access->CreateArchetype(types, count);
