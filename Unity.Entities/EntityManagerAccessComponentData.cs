@@ -371,7 +371,7 @@ namespace Unity.Entities
             ecs->SetSharedComponentDataBoxedDefaultMustBeNull(entity, typeIndex, hashCode, componentData, mcs);
         }
 
-        internal void SetComponentObject(Entity entity, ComponentType componentType, object componentObject)
+        public void SetComponentObject(Entity entity, ComponentType componentType, object componentObject)
         {
             var ecs = GetCheckedEntityDataAccess();
             var mcs = ecs->ManagedComponentStore;
