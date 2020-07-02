@@ -175,9 +175,9 @@ namespace Unity.Entities
         }
 
         // FIXME: HACK! - mono 4.6 has problems invoking virtual methods as delegates from native, so wrap the invocation in a non-virtual class
-        internal class DummyDelegateWrapper
+        public class DummyDelegateWrapper
         {
-            internal ComponentSystemBase System => m_System;
+            public ComponentSystemBase System => m_System;
             private readonly ComponentSystemBase m_System;
 
             public DummyDelegateWrapper(ComponentSystemBase sys)
